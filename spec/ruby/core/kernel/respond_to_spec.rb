@@ -6,6 +6,10 @@ describe "Kernel#respond_to?" do
     @a = KernelSpecs::A.new
   end
 
+  it "returns true for checking for `==` on nil" do
+    nil.respond_to?(:==).should == true
+  end
+
   it "is a public method" do
     Kernel.public_instance_methods(false).should.include?(:respond_to?)
   end

@@ -29,6 +29,7 @@
 #include "internal/set_table.h"
 #include "internal/struct.h"
 #include "variable.h"
+#include "method.h"
 
 /* finish iseq array */
 #include "insns.inc"
@@ -6229,6 +6230,92 @@ vm_opt_ary_freeze(VALUE ary, int bop, ID id)
         return ary;
     }
     else {
+        return Qundef;
+    }
+}
+
+
+static VALUE
+vm_opt_respond_to(
+    struct rb_control_frame_struct *reg_cfp,
+    struct rb_call_data *cd,
+    VALUE recv,
+    VALUE mid,
+    VALUE include_all
+)
+{
+
+    VALUE klass = CLASS_OF(recv);
+    VM_ASSERT(klass != Qfalse);
+    VM_ASSERT(RBASIC_CLASS(klass) == 0 || rb_obj_is_kind_of(klass, rb_cClass));
+
+    VALUE cd_owner = (VALUE)reg_cfp->iseq;
+    const struct rb_callcache *respond_to_cc = vm_search_method(cd_owner, cd, recv);
+    const rb_callable_method_entry_t *respond_to_cme = vm_cc_cme(respond_to_cc);
+
+    if (!respond_to_cme || !METHOD_ENTRY_BASIC(respond_to_cme)) {
+        return Qundef;
+    }
+
+    ID id = rb_check_id(&mid);
+    const rb_callable_method_entry_t *cme_respond_to = cd->cme_respond_to;
+
+    if (cme_respond_to && !UNDEFINED_METHOD_ENTRY_P(cme_respond_to)) {
+        if (LIKELY(cd->klass_respond_to == klass)) {
+            if (!METHOD_ENTRY_INVALIDATED(cme_respond_to) && cme_respond_to->called_id == id) {
+                VM_ASSERT(callable_method_entry_p(cme_respond_to));
+
+                rb_method_visibility_t visi = METHOD_ENTRY_VISI(cme_respond_to);
+                if (visi == METHOD_VISI_PUBLIC) {
+                    return Qtrue;
+                } else {
+                    return include_all == Qtrue ? Qtrue : Qfalse;
+                }
+            }
+        }
+    }
+
+    // rb_execution_context_t *ec = GET_EC();
+    // VALUE mid_sym = rb_to_symbol(mid);
+
+    if (!id) {
+        return Qundef; // Fallback to normal method call
+    }
+
+    if (cd->cme_respond_to && UNDEFINED_METHOD_ENTRY_P(cd->cme_respond_to)) {
+        if (LIKELY(cd->klass_respond_to == klass)) {
+            if (!METHOD_ENTRY_INVALIDATED(cd->cme_respond_to) && cd->cme_respond_to->called_id == id) {
+                const rb_callable_method_entry_t *cme_respond_to_missing = cd->cme_respond_to_missing;
+                if (cme_respond_to_missing) {
+                    if (cd->klass_respond_to_missing == klass) {
+                        if (!METHOD_ENTRY_INVALIDATED(cme_respond_to_missing) && cme_respond_to_missing->called_id == idRespond_to_missing) {
+                            return Qundef; // Fallback to normal method call
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Use refinement-aware method lookup for optimization
+    VALUE defined_class;
+    const rb_callable_method_entry_t *cme = rb_callable_method_entry_with_refinements(klass, id, &defined_class);
+    
+    if (cme && !UNDEFINED_METHOD_ENTRY_P(cme)) {
+        if (cme->def->type == VM_METHOD_TYPE_NOTIMPLEMENTED) {
+            // Method is not implemented, fallback to normal method call for respond_to_missing?
+            return Qundef;
+        }
+        
+        // Method exists, check visibility
+        rb_method_visibility_t visi = METHOD_ENTRY_VISI(cme);
+        if (RTEST(include_all) || visi == METHOD_VISI_PUBLIC) {
+            return Qtrue;
+        } else {
+            return Qfalse;
+        }
+    } else {
+        // Method doesn't exist, fallback to normal method call for respond_to_missing?
         return Qundef;
     }
 }

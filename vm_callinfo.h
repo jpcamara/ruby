@@ -577,7 +577,14 @@ vm_cc_invalidate(const struct rb_callcache *cc)
 struct rb_call_data {
     const struct rb_callinfo *ci;
     const struct rb_callcache *cc;
+    VALUE klass_respond_to; // should not mark it because klass can not be free'd
+                       // because of this marking. When klass is collected,
+                       // cc will be cleared (cc->klass = 0) at vm_ccs_free().
+    const rb_callable_method_entry_t *cme_respond_to;
+    VALUE klass_respond_to_missing;
+    const rb_callable_method_entry_t *cme_respond_to_missing;
 };
+
 
 struct rb_class_cc_entries {
 #if VM_CHECK_MODE > 0

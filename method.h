@@ -272,4 +272,5 @@ struct rb_hook_list_struct *rb_method_def_local_hooks(rb_method_definition_t *de
 void rb_method_definition_addref(rb_method_definition_t *def);
 void rb_method_definition_release(rb_method_definition_t *def);
 
+
 #endif /* RUBY_METHOD_H */
