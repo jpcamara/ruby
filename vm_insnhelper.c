@@ -6249,9 +6249,8 @@ vm_opt_respond_to(
     VM_ASSERT(RBASIC_CLASS(klass) == 0 || rb_obj_is_kind_of(klass, rb_cClass));
 
     // Check that respond_to? is the basic implementation (not overridden)
-    VALUE cd_owner = (VALUE)reg_cfp->iseq;
-    const struct rb_callcache *respond_to_cc = vm_search_method(cd_owner, cd, recv);
-    const rb_callable_method_entry_t *respond_to_cme = vm_cc_cme(respond_to_cc);
+    VALUE cd_owner = (VALUE)CFP_ISEQ(reg_cfp);
+    const rb_callable_method_entry_t *respond_to_cme = vm_search_method(reg_cfp, cd, recv);
 
     if (!respond_to_cme || !METHOD_ENTRY_BASIC(respond_to_cme)) {
         return Qundef;  // respond_to? is overridden, fallback

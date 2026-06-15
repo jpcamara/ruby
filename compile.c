@@ -3622,7 +3622,7 @@ iseq_peephole_optimize(rb_iseq_t *iseq, LINK_ELEMENT *list, const int do_tailcal
                 iobj->insn_id = BIN(opt_respond_to);
                 // iobj->operand_size = 2;
                 iobj->operand_size = 1;
-                iobj->operands = compile_data_calloc2(iseq, iobj->operand_size, sizeof(VALUE));
+                iobj->operands = compile_data_calloc2_type(iseq, VALUE, iobj->operand_size);
                 // iobj->operands[0] = rb_cArray_empty_frozen;
                 iobj->operands[0] = (VALUE)ci;
             }
