@@ -2375,7 +2375,7 @@ method_boundp(VALUE klass, ID id, int ex)
     return 0;
 }
 
-static const rb_callable_method_entry_t *
+MAYBE_UNUSED(static const rb_callable_method_entry_t *)
 vm_opt_respond_to_method_entry(int *result, VALUE klass, ID id, int ex)
 {
     const rb_callable_method_entry_t *cme;

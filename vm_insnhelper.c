@@ -6244,69 +6244,61 @@ vm_opt_respond_to(
     VALUE include_all
 )
 {
-
     VALUE klass = CLASS_OF(recv);
     VM_ASSERT(klass != Qfalse);
     VM_ASSERT(RBASIC_CLASS(klass) == 0 || rb_obj_is_kind_of(klass, rb_cClass));
 
+    // Check that respond_to? is the basic implementation (not overridden)
     VALUE cd_owner = (VALUE)reg_cfp->iseq;
     const struct rb_callcache *respond_to_cc = vm_search_method(cd_owner, cd, recv);
     const rb_callable_method_entry_t *respond_to_cme = vm_cc_cme(respond_to_cc);
 
     if (!respond_to_cme || !METHOD_ENTRY_BASIC(respond_to_cme)) {
-        return Qundef;
+        return Qundef;  // respond_to? is overridden, fallback
     }
 
+    // Convert method name to ID
     ID id = rb_check_id(&mid);
-    const rb_callable_method_entry_t *cme_respond_to = cd->cme_respond_to;
-
-    if (cme_respond_to && !UNDEFINED_METHOD_ENTRY_P(cme_respond_to)) {
-        if (LIKELY(cd->klass_respond_to == klass)) {
-            if (!METHOD_ENTRY_INVALIDATED(cme_respond_to) && cme_respond_to->called_id == id) {
-                VM_ASSERT(callable_method_entry_p(cme_respond_to));
-
-                rb_method_visibility_t visi = METHOD_ENTRY_VISI(cme_respond_to);
-                if (visi == METHOD_VISI_PUBLIC) {
-                    return Qtrue;
-                } else {
-                    return include_all == Qtrue ? Qtrue : Qfalse;
-                }
-            }
-        }
-    }
-
-    // rb_execution_context_t *ec = GET_EC();
-    // VALUE mid_sym = rb_to_symbol(mid);
-
     if (!id) {
-        return Qundef; // Fallback to normal method call
+        return Qundef; // Can't convert to ID, fallback to normal method call
     }
 
-    if (cd->cme_respond_to && UNDEFINED_METHOD_ENTRY_P(cd->cme_respond_to)) {
-        if (LIKELY(cd->klass_respond_to == klass)) {
-            if (!METHOD_ENTRY_INVALIDATED(cd->cme_respond_to) && cd->cme_respond_to->called_id == id) {
-                const rb_callable_method_entry_t *cme_respond_to_missing = cd->cme_respond_to_missing;
-                if (cme_respond_to_missing) {
-                    if (cd->klass_respond_to_missing == klass) {
-                        if (!METHOD_ENTRY_INVALIDATED(cme_respond_to_missing) && cme_respond_to_missing->called_id == idRespond_to_missing) {
-                            return Qundef; // Fallback to normal method call
-                        }
-                    }
-                }
-            }
+    // Check inline cache - must match BOTH class and method ID
+    const rb_callable_method_entry_t *cached_cme = cd->cme_respond_to;
+    if (cached_cme != NULL &&
+        cd->klass_respond_to == klass &&
+        !UNDEFINED_METHOD_ENTRY_P(cached_cme) &&
+        !METHOD_ENTRY_INVALIDATED(cached_cme) &&
+        cached_cme->called_id == id) {
+
+        // Cache hit! Return cached visibility result
+        VM_ASSERT(callable_method_entry_p(cached_cme));
+        rb_method_visibility_t visi = METHOD_ENTRY_VISI(cached_cme);
+        if (visi == METHOD_VISI_PUBLIC) {
+            return Qtrue;
+        } else {
+            return RTEST(include_all) ? Qtrue : Qfalse;
         }
     }
 
-    // Use refinement-aware method lookup for optimization
+    // Cache miss or invalid - perform method lookup
     VALUE defined_class;
     const rb_callable_method_entry_t *cme = rb_callable_method_entry_with_refinements(klass, id, &defined_class);
-    
+
     if (cme && !UNDEFINED_METHOD_ENTRY_P(cme)) {
         if (cme->def->type == VM_METHOD_TYPE_NOTIMPLEMENTED) {
-            // Method is not implemented, fallback to normal method call for respond_to_missing?
+            // Method is marked as not implemented, fallback to call respond_to_missing?
             return Qundef;
         }
-        
+
+        // Populate cache for next call with this class+method combination.
+        // Write barriers: the iseq (cd_owner) now references these, so the
+        // generational GC must track them or a minor GC could free them.
+        cd->cme_respond_to = cme;
+        cd->klass_respond_to = klass;
+        RB_OBJ_WRITTEN(cd_owner, Qundef, (VALUE)cme);
+        RB_OBJ_WRITTEN(cd_owner, Qundef, klass);
+
         // Method exists, check visibility
         rb_method_visibility_t visi = METHOD_ENTRY_VISI(cme);
         if (RTEST(include_all) || visi == METHOD_VISI_PUBLIC) {
