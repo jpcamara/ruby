@@ -583,13 +583,14 @@ struct rb_call_data {
      *       used to answer fast when :m isn't a real method.
      * All are GC-marked and compaction-updated in rb_iseq_mark_and_move (and
      * dropped when the cme is invalidated) so a freed class's address can't be
-     * reused under us (ABA). */
+     * reused under us (ABA). Each entry is a two-word (klass + cme) pair with no
+     * atomic publish, so vm_opt_respond_to only reads/writes them when a single
+     * Ractor is running (rb_multi_ractor_p() is false). */
     VALUE klass_respond_to;
     const rb_callable_method_entry_t *cme_respond_to;
     VALUE klass_respond_to_missing;
     const rb_callable_method_entry_t *cme_respond_to_missing;
 };
-
 
 struct rb_class_cc_entries {
 #if VM_CHECK_MODE > 0

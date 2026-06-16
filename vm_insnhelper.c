@@ -6262,9 +6262,17 @@ vm_opt_respond_to(
         return Qundef; // Can't convert to ID, fallback to normal method call
     }
 
+    // The inline caches below are two words each (klass + cme), so a parallel
+    // read/write across Ractors could observe a torn pair and return the wrong
+    // visibility. Only use them when a single Ractor is running, where the GVL
+    // serializes the writes within this instruction (same approach as the other
+    // inline caches in this file).
+    const bool cacheable = !rb_multi_ractor_p();
+
     // Check inline cache - must match BOTH class and method ID
     const rb_callable_method_entry_t *cached_cme = cd->cme_respond_to;
-    if (cached_cme != NULL &&
+    if (cacheable &&
+        cached_cme != NULL &&
         cd->klass_respond_to == klass &&
         !UNDEFINED_METHOD_ENTRY_P(cached_cme) &&
         !METHOD_ENTRY_INVALIDATED(cached_cme) &&
@@ -6293,10 +6301,12 @@ vm_opt_respond_to(
         // Populate cache for next call with this class+method combination.
         // Write barriers: the iseq (cd_owner) now references these, so the
         // generational GC must track them or a minor GC could free them.
-        cd->cme_respond_to = cme;
-        cd->klass_respond_to = klass;
-        RB_OBJ_WRITTEN(cd_owner, Qundef, (VALUE)cme);
-        RB_OBJ_WRITTEN(cd_owner, Qundef, klass);
+        if (cacheable) {
+            cd->cme_respond_to = cme;
+            cd->klass_respond_to = klass;
+            RB_OBJ_WRITTEN(cd_owner, Qundef, (VALUE)cme);
+            RB_OBJ_WRITTEN(cd_owner, Qundef, klass);
+        }
 
         // Method exists, check visibility
         rb_method_visibility_t visi = METHOD_ENTRY_VISI(cme);
@@ -6311,17 +6321,20 @@ vm_opt_respond_to(
         // common case (respond_to_missing? not overridden) resolves to a fast
         // Qfalse instead of falling back to a full respond_to? dispatch.
         const rb_callable_method_entry_t *rtm_cme;
-        if (cd->cme_respond_to_missing != NULL &&
+        if (cacheable &&
+            cd->cme_respond_to_missing != NULL &&
             cd->klass_respond_to_missing == klass &&
             !METHOD_ENTRY_INVALIDATED(cd->cme_respond_to_missing)) {
             rtm_cme = cd->cme_respond_to_missing;
         }
         else {
             rtm_cme = rb_callable_method_entry(klass, idRespond_to_missing);
-            cd->cme_respond_to_missing = rtm_cme;
-            cd->klass_respond_to_missing = klass;
-            if (rtm_cme) RB_OBJ_WRITTEN(cd_owner, Qundef, (VALUE)rtm_cme);
-            RB_OBJ_WRITTEN(cd_owner, Qundef, klass);
+            if (cacheable) {
+                cd->cme_respond_to_missing = rtm_cme;
+                cd->klass_respond_to_missing = klass;
+                if (rtm_cme) RB_OBJ_WRITTEN(cd_owner, Qundef, (VALUE)rtm_cme);
+                RB_OBJ_WRITTEN(cd_owner, Qundef, klass);
+            }
         }
 
         if (!rtm_cme || METHOD_ENTRY_BASIC(rtm_cme)) {

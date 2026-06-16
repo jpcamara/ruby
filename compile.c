@@ -3598,31 +3598,22 @@ iseq_peephole_optimize(rb_iseq_t *iseq, LINK_ELEMENT *list, const int do_tailcal
         }
     }
 
+    /*
+     * send     <calldata!mid:respond_to?, argc:1..2, ARGS_SIMPLE>
+     * =>
+     * opt_respond_to <calldata!mid:respond_to?, argc:1..2, ARGS_SIMPLE>
+     */
     if (IS_INSN_ID(iobj, send)) {
         const struct rb_callinfo *ci = (struct rb_callinfo *)OPERAND_AT(iobj, 0);
         const rb_iseq_t *blockiseq = (rb_iseq_t *)OPERAND_AT(iobj, 1);
-
-        // == disasm: #<ISeq:<main>@../test.rb:2 (2,0)-(2,76)>
-        // 0000 getglobal                              :$stdout                  (   2)[Li]
-        // 0002 putobject                              :write
-        // 0004 opt_send_without_block                 <calldata!mid:respond_to?, argc:1, ARGS_SIMPLE>
-        // 0006 branchunless                           14
-        // 0008 putself
-        // 0009 putchilledstring                       "Did you know you can write to $stdout?"
-        // 0011 opt_send_without_block                 <calldata!mid:puts, argc:1, FCALL|ARGS_SIMPLE>
-        // 0013 leave
-        // 0014 putnil
-        // 0015 leave
         int argc = vm_ci_argc(ci);
-        if (vm_ci_simple(ci) && blockiseq == NULL && vm_ci_mid(ci) == idRespond_to) {
-            if (argc == 1 || argc == 2) {
-                iobj->insn_id = BIN(opt_respond_to);
-                // iobj->operand_size = 2;
-                iobj->operand_size = 1;
-                iobj->operands = compile_data_calloc2_type(iseq, VALUE, iobj->operand_size);
-                // iobj->operands[0] = rb_cArray_empty_frozen;
-                iobj->operands[0] = (VALUE)ci;
-            }
+
+        if (vm_ci_simple(ci) && blockiseq == NULL && vm_ci_mid(ci) == idRespond_to &&
+            (argc == 1 || argc == 2)) {
+            iobj->insn_id = BIN(opt_respond_to);
+            iobj->operand_size = 1;
+            iobj->operands = compile_data_calloc2_type(iseq, VALUE, iobj->operand_size);
+            iobj->operands[0] = (VALUE)ci;
         }
     }
 

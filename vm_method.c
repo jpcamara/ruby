@@ -2375,45 +2375,6 @@ method_boundp(VALUE klass, ID id, int ex)
     return 0;
 }
 
-MAYBE_UNUSED(static const rb_callable_method_entry_t *)
-vm_opt_respond_to_method_entry(int *result, VALUE klass, ID id, int ex)
-{
-    const rb_callable_method_entry_t *cme;
-    VM_ASSERT_TYPE2(klass, T_CLASS, T_ICLASS);
-
-    cme = rb_callable_method_entry_with_refinements(klass, id, NULL);
-
-    if (cme != NULL) {
-        if (ex & ~BOUND_RESPONDS) {
-            switch (METHOD_ENTRY_VISI(cme)) {
-              case METHOD_VISI_PRIVATE:
-                *result = 0;
-                return cme;
-              case METHOD_VISI_PROTECTED:
-                if (ex & BOUND_RESPONDS) {
-                    *result = 0;
-                    return cme;
-                }
-              default:
-                break;
-            }
-        }
-
-        if (cme->def->type == VM_METHOD_TYPE_NOTIMPLEMENTED) {
-            if (ex & BOUND_RESPONDS) {
-                *result = 2;
-                return cme;
-            }
-            *result = 0;
-            return cme;
-        }
-        *result = 1;
-        return cme;
-    }
-    *result = 0;
-    return NULL;
-}
-
 // deprecated
 int
 rb_method_boundp(VALUE klass, ID id, int ex)
@@ -3479,32 +3440,18 @@ call_method_entry(rb_execution_context_t *ec, VALUE defined_class, VALUE obj, ID
     return result;
 }
 
-static const rb_callable_method_entry_t *
-basic_obj_respond_to_missing_cme(rb_execution_context_t *ec, VALUE klass, VALUE obj,
-                             VALUE mid, VALUE priv)
-{
-    const ID rtmid = idRespond_to_missing;
-    const rb_callable_method_entry_t *const cme = callable_method_entry(klass, rtmid, NULL);
-    return cme;
-}
-
-static VALUE
-basic_obj_respond_to_missing_call(rb_execution_context_t *ec, VALUE obj,
-                             VALUE mid, VALUE priv, const rb_callable_method_entry_t *cme)
-{
-    if (!cme || METHOD_ENTRY_BASIC(cme)) {
-        return Qundef;
-    }
-    VALUE args[2] = { mid, priv };
-    return call_method_entry(ec, cme->defined_class, obj, idRespond_to_missing, cme, 2, args, RB_NO_KEYWORDS);
-}
-
 static VALUE
 basic_obj_respond_to_missing(rb_execution_context_t *ec, VALUE klass, VALUE obj,
                              VALUE mid, VALUE priv)
 {
-    const rb_callable_method_entry_t *const cme = basic_obj_respond_to_missing_cme(ec, klass, obj, mid, priv);
-    return basic_obj_respond_to_missing_call(ec, obj, mid, priv, cme);
+    VALUE defined_class, args[2];
+    const ID rtmid = idRespond_to_missing;
+    const rb_callable_method_entry_t *const cme = callable_method_entry(klass, rtmid, &defined_class);
+
+    if (!cme || METHOD_ENTRY_BASIC(cme)) return Qundef;
+    args[0] = mid;
+    args[1] = priv;
+    return call_method_entry(ec, defined_class, obj, rtmid, cme, 2, args, RB_NO_KEYWORDS);
 }
 
 static inline int
@@ -3526,7 +3473,7 @@ basic_obj_respond_to(rb_execution_context_t *ec, VALUE obj, ID id, int pub)
 }
 
 static int
-vm_respond_to(rb_execution_context_t *ec, VALUE klass, VALUE obj, ID id, int priv) //TODO: need to figure out how this works in an instruction world
+vm_respond_to(rb_execution_context_t *ec, VALUE klass, VALUE obj, ID id, int priv)
 {
     VALUE defined_class;
     const ID resid = idRespond_to;
