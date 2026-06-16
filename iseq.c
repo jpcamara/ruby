@@ -394,32 +394,6 @@ rb_iseq_mark_and_move(rb_iseq_t *iseq, bool reference_updating)
                 else if (cds[i].cc != rb_vm_empty_cc()) {
                     cds[i].cc = rb_vm_empty_cc();
                 }
-
-                /* opt_respond_to inline caches: keep the cached class + cme alive
-                 * (and compaction-correct). Without this the entries dangle —
-                 * a freed class's address can be reused (ABA), turning the next
-                 * cache hit into a use-after-free. Drop an entry if its method
-                 * was invalidated so we never pin a stale class/method. Both the
-                 * respond_to and respond_to_missing? caches need this. */
-                if (cds[i].cme_respond_to &&
-                    !METHOD_ENTRY_INVALIDATED(cds[i].cme_respond_to)) {
-                    rb_gc_mark_and_move_ptr(&cds[i].cme_respond_to);
-                    rb_gc_mark_and_move(&cds[i].klass_respond_to);
-                }
-                else {
-                    cds[i].cme_respond_to = NULL;
-                    cds[i].klass_respond_to = 0;
-                }
-
-                if (cds[i].cme_respond_to_missing &&
-                    !METHOD_ENTRY_INVALIDATED(cds[i].cme_respond_to_missing)) {
-                    rb_gc_mark_and_move_ptr(&cds[i].cme_respond_to_missing);
-                    rb_gc_mark_and_move(&cds[i].klass_respond_to_missing);
-                }
-                else {
-                    cds[i].cme_respond_to_missing = NULL;
-                    cds[i].klass_respond_to_missing = 0;
-                }
             }
         }
 

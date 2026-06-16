@@ -2840,7 +2840,6 @@ iseq_set_sequence(rb_iseq_t *iseq, LINK_ANCHOR *const anchor)
                             struct rb_call_data *cd = &body->call_data[ISEQ_COMPILE_DATA(iseq)->ci_index++];
                             cd->ci = source_ci;
                             cd->cc = vm_cc_empty();
-                            cd->cme_respond_to = NULL;
                             generated_iseq[code_index + 1 + j] = (VALUE)cd;
                             break;
                         }

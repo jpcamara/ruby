@@ -6248,100 +6248,41 @@ vm_opt_respond_to(
     VM_ASSERT(klass != Qfalse);
     VM_ASSERT(RBASIC_CLASS(klass) == 0 || rb_obj_is_kind_of(klass, rb_cClass));
 
-    // Check that respond_to? is the basic implementation (not overridden)
-    VALUE cd_owner = (VALUE)CFP_ISEQ(reg_cfp);
+    // Only specialize when respond_to? itself is the basic Kernel implementation.
+    // vm_search_method uses cd->cc, which is properly invalidated, so this stays
+    // correct when respond_to? is (re)defined.
     const rb_callable_method_entry_t *respond_to_cme = vm_search_method(reg_cfp, cd, recv);
-
     if (!respond_to_cme || !METHOD_ENTRY_BASIC(respond_to_cme)) {
-        return Qundef;  // respond_to? is overridden, fallback
+        return Qundef;  // respond_to? is overridden; fall back to a normal call.
     }
 
-    // Convert method name to ID
     ID id = rb_check_id(&mid);
     if (!id) {
-        return Qundef; // Can't convert to ID, fallback to normal method call
+        return Qundef; // not an existing symbol/string; let the full method handle it.
     }
 
-    // The inline caches below are two words each (klass + cme), so a parallel
-    // read/write across Ractors could observe a torn pair and return the wrong
-    // visibility. Only use them when a single Ractor is running, where the GVL
-    // serializes the writes within this instruction (same approach as the other
-    // inline caches in this file).
-    const bool cacheable = !rb_multi_ractor_p();
-
-    // Check inline cache - must match BOTH class and method ID
-    const rb_callable_method_entry_t *cached_cme = cd->cme_respond_to;
-    if (cacheable &&
-        cached_cme != NULL &&
-        cd->klass_respond_to == klass &&
-        !UNDEFINED_METHOD_ENTRY_P(cached_cme) &&
-        !METHOD_ENTRY_INVALIDATED(cached_cme) &&
-        cached_cme->called_id == id) {
-
-        // Cache hit! Return cached visibility result
-        VM_ASSERT(callable_method_entry_p(cached_cme));
-        rb_method_visibility_t visi = METHOD_ENTRY_VISI(cached_cme);
-        if (visi == METHOD_VISI_PUBLIC) {
-            return Qtrue;
-        } else {
-            return RTEST(include_all) ? Qtrue : Qfalse;
-        }
-    }
-
-    // Cache miss or invalid - perform method lookup
-    VALUE defined_class;
-    const rb_callable_method_entry_t *cme = rb_callable_method_entry_with_refinements(klass, id, &defined_class);
+    // Resolve the queried method directly. rb_callable_method_entry* already goes
+    // through the class's (invalidated-on-change) method cache, so there is no need
+    // for a separate inline cache here -- a custom one only added correctness
+    // hazards (stale visibility on redefinition/shadowing, and torn reads across
+    // Ractors) for negligible gain.
+    const rb_callable_method_entry_t *cme = rb_callable_method_entry_with_refinements(klass, id, NULL);
 
     if (cme && !UNDEFINED_METHOD_ENTRY_P(cme)) {
         if (cme->def->type == VM_METHOD_TYPE_NOTIMPLEMENTED) {
-            // Method is marked as not implemented, fallback to call respond_to_missing?
-            return Qundef;
+            return Qundef; // not-implemented stub; defer to the full respond_to?.
         }
-
-        // Populate cache for next call with this class+method combination.
-        // Write barriers: the iseq (cd_owner) now references these, so the
-        // generational GC must track them or a minor GC could free them.
-        if (cacheable) {
-            cd->cme_respond_to = cme;
-            cd->klass_respond_to = klass;
-            RB_OBJ_WRITTEN(cd_owner, Qundef, (VALUE)cme);
-            RB_OBJ_WRITTEN(cd_owner, Qundef, klass);
-        }
-
-        // Method exists, check visibility
         rb_method_visibility_t visi = METHOD_ENTRY_VISI(cme);
-        if (RTEST(include_all) || visi == METHOD_VISI_PUBLIC) {
-            return Qtrue;
-        } else {
-            return Qfalse;
-        }
-    } else {
-        // :id is not a normal method on klass. The answer now depends on
-        // respond_to_missing?. Inline-cache its method entry per class so the
-        // common case (respond_to_missing? not overridden) resolves to a fast
-        // Qfalse instead of falling back to a full respond_to? dispatch.
-        const rb_callable_method_entry_t *rtm_cme;
-        if (cacheable &&
-            cd->cme_respond_to_missing != NULL &&
-            cd->klass_respond_to_missing == klass &&
-            !METHOD_ENTRY_INVALIDATED(cd->cme_respond_to_missing)) {
-            rtm_cme = cd->cme_respond_to_missing;
-        }
-        else {
-            rtm_cme = rb_callable_method_entry(klass, idRespond_to_missing);
-            if (cacheable) {
-                cd->cme_respond_to_missing = rtm_cme;
-                cd->klass_respond_to_missing = klass;
-                if (rtm_cme) RB_OBJ_WRITTEN(cd_owner, Qundef, (VALUE)rtm_cme);
-                RB_OBJ_WRITTEN(cd_owner, Qundef, klass);
-            }
-        }
-
+        return (RTEST(include_all) || visi == METHOD_VISI_PUBLIC) ? Qtrue : Qfalse;
+    }
+    else {
+        // No such method: the answer depends on respond_to_missing?. When it is the
+        // default (not overridden) the answer is false; otherwise fall back to
+        // actually invoke it.
+        const rb_callable_method_entry_t *rtm_cme = rb_callable_method_entry(klass, idRespond_to_missing);
         if (!rtm_cme || METHOD_ENTRY_BASIC(rtm_cme)) {
-            // Default respond_to_missing? (not overridden) always answers false.
             return Qfalse;
         }
-        // respond_to_missing? is overridden; fall back to actually invoke it.
         return Qundef;
     }
 }

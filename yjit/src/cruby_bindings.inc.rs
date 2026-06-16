@@ -673,13 +673,10 @@ pub struct rb_callinfo {
     pub argc: ::std::os::raw::c_uint,
 }
 #[repr(C)]
+#[derive(Debug, Copy, Clone)]
 pub struct rb_call_data {
     pub ci: *const rb_callinfo,
     pub cc: *const rb_callcache,
-    pub klass_respond_to: VALUE,
-    pub cme_respond_to: *const rb_callable_method_entry_t,
-    pub klass_respond_to_missing: VALUE,
-    pub cme_respond_to_missing: *const rb_callable_method_entry_t,
 }
 pub const RSTRING_CHILLED: ruby_rstring_private_flags = 49152;
 pub type ruby_rstring_private_flags = u32;
