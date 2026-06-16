@@ -577,12 +577,17 @@ vm_cc_invalidate(const struct rb_callcache *cc)
 struct rb_call_data {
     const struct rb_callinfo *ci;
     const struct rb_callcache *cc;
-    /* opt_respond_to inline cache: the receiver class + resolved method entry
-     * for the last respond_to? at this call site. Both are GC-marked and
-     * compaction-updated in rb_iseq_mark_and_move (and dropped when the cme is
-     * invalidated) so a freed class's address can't be reused under us (ABA). */
+    /* opt_respond_to inline caches, keyed by receiver class:
+     *   (1) klass/cme_respond_to        - the method resolved for respond_to?(:m)
+     *   (2) klass/cme_respond_to_missing - respond_to_missing? for the class,
+     *       used to answer fast when :m isn't a real method.
+     * All are GC-marked and compaction-updated in rb_iseq_mark_and_move (and
+     * dropped when the cme is invalidated) so a freed class's address can't be
+     * reused under us (ABA). */
     VALUE klass_respond_to;
     const rb_callable_method_entry_t *cme_respond_to;
+    VALUE klass_respond_to_missing;
+    const rb_callable_method_entry_t *cme_respond_to_missing;
 };
 
 

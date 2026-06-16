@@ -6306,7 +6306,29 @@ vm_opt_respond_to(
             return Qfalse;
         }
     } else {
-        // Method doesn't exist, fallback to normal method call for respond_to_missing?
+        // :id is not a normal method on klass. The answer now depends on
+        // respond_to_missing?. Inline-cache its method entry per class so the
+        // common case (respond_to_missing? not overridden) resolves to a fast
+        // Qfalse instead of falling back to a full respond_to? dispatch.
+        const rb_callable_method_entry_t *rtm_cme;
+        if (cd->cme_respond_to_missing != NULL &&
+            cd->klass_respond_to_missing == klass &&
+            !METHOD_ENTRY_INVALIDATED(cd->cme_respond_to_missing)) {
+            rtm_cme = cd->cme_respond_to_missing;
+        }
+        else {
+            rtm_cme = rb_callable_method_entry(klass, idRespond_to_missing);
+            cd->cme_respond_to_missing = rtm_cme;
+            cd->klass_respond_to_missing = klass;
+            if (rtm_cme) RB_OBJ_WRITTEN(cd_owner, Qundef, (VALUE)rtm_cme);
+            RB_OBJ_WRITTEN(cd_owner, Qundef, klass);
+        }
+
+        if (!rtm_cme || METHOD_ENTRY_BASIC(rtm_cme)) {
+            // Default respond_to_missing? (not overridden) always answers false.
+            return Qfalse;
+        }
+        // respond_to_missing? is overridden; fall back to actually invoke it.
         return Qundef;
     }
 }
