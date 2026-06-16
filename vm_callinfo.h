@@ -577,12 +577,12 @@ vm_cc_invalidate(const struct rb_callcache *cc)
 struct rb_call_data {
     const struct rb_callinfo *ci;
     const struct rb_callcache *cc;
-    VALUE klass_respond_to; // should not mark it because klass can not be free'd
-                       // because of this marking. When klass is collected,
-                       // cc will be cleared (cc->klass = 0) at vm_ccs_free().
+    /* opt_respond_to inline cache: the receiver class + resolved method entry
+     * for the last respond_to? at this call site. Both are GC-marked and
+     * compaction-updated in rb_iseq_mark_and_move (and dropped when the cme is
+     * invalidated) so a freed class's address can't be reused under us (ABA). */
+    VALUE klass_respond_to;
     const rb_callable_method_entry_t *cme_respond_to;
-    VALUE klass_respond_to_missing;
-    const rb_callable_method_entry_t *cme_respond_to_missing;
 };
 
 
