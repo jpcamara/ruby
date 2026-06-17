@@ -6256,9 +6256,17 @@ vm_opt_respond_to(
         return Qundef;  // respond_to? is overridden; fall back to a normal call.
     }
 
-    ID id = rb_check_id(&mid);
-    if (!id) {
-        return Qundef; // not an existing symbol/string; let the full method handle it.
+    // Fast path for the common literal-symbol argument: a static symbol already
+    // encodes its id, so skip the (cross-TU, non-inlined) rb_check_id call.
+    ID id;
+    if (LIKELY(STATIC_SYM_P(mid))) {
+        id = RSHIFT((VALUE)mid, RUBY_SPECIAL_SHIFT);
+    }
+    else {
+        id = rb_check_id(&mid);
+        if (!id) {
+            return Qundef; // not an existing symbol/string; let the full method handle it.
+        }
     }
 
     // Resolve the queried method directly. rb_callable_method_entry* already goes
