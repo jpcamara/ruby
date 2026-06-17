@@ -93,10 +93,12 @@ fn profile_insn(bare_opcode: ruby_vminsn_type, ec: EcPtr) {
         YARVINSN_invokeblock   => profile_block_handler(profiler, profile),
         YARVINSN_getblockparamproxy => profile_getblockparamproxy(profiler, profile),
         YARVINSN_invokesuper   => profile_invokesuper(profiler, profile),
-        YARVINSN_opt_send_without_block | YARVINSN_send => {
+        YARVINSN_opt_send_without_block | YARVINSN_send | YARVINSN_opt_respond_to => {
             let cd: *const rb_call_data = profiler.insn_opnd(0).as_ptr();
             let argc = num_arguments_on_stack(cd);
-            // Profile all the arguments and self (+1).
+            // Profile all the arguments and self (+1). For opt_respond_to this
+            // gives the optimizer the receiver class, so inline_kernel_respond_to_p
+            // can fold respond_to?(:literal) to a constant instead of calling it.
             profile_operands(profiler, profile, argc + 1);
         }
         YARVINSN_splatkw => profile_operands(profiler, profile, 2),
