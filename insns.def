@@ -1025,7 +1025,7 @@ opt_respond_to_symbol_drop
 (VALUE recv)
 ()
 {
-    vm_opt_respond_to_symbol_drop(GET_CFP(), cd, target_cd, rtm_cd, recv, id);
+    (void)vm_opt_respond_to_symbol(GET_CFP(), cd, target_cd, rtm_cd, recv, id);
 }
 
 DEFINE_INSN
@@ -1037,7 +1037,7 @@ opt_respond_to_symbol_drop_local
     VALUE recv = *(vm_get_ep(GET_EP(), level) - idx);
     RB_DEBUG_COUNTER_INC(lvar_get);
     (void)RB_DEBUG_COUNTER_INC_IF(lvar_get_dynamic, level > 0);
-    vm_opt_respond_to_symbol_drop(GET_CFP(), cd, target_cd, rtm_cd, recv, id);
+    (void)vm_opt_respond_to_symbol(GET_CFP(), cd, target_cd, rtm_cd, recv, id);
 }
 
 DEFINE_INSN
