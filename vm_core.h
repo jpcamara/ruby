@@ -294,6 +294,18 @@ struct iseq_inline_cvar_cache_entry {
     struct rb_cvar_class_tbl_entry *entry;
 };
 
+/*
+ * ISeq mark/compaction handles generic ISE entries as `once.value`, so keep
+ * the cached class in the second word. The low bit of method_state_and_result
+ * stores the boolean result; ruby_vm_global_method_state is always even.
+ */
+struct iseq_inline_respond_to_cache_entry {
+    rb_serial_t method_state_and_result;
+    VALUE klass;
+};
+STATIC_ASSERT(sizeof_iseq_inline_respond_to_cache_entry,
+              sizeof(struct iseq_inline_respond_to_cache_entry) == (2 * sizeof(VALUE)));
+
 union iseq_inline_storage_entry {
     struct {
         struct rb_thread_struct *running_thread;
@@ -301,6 +313,7 @@ union iseq_inline_storage_entry {
     } once;
     struct iseq_inline_constant_cache ic_cache;
     struct iseq_inline_iv_cache_entry iv_cache;
+    struct iseq_inline_respond_to_cache_entry respond_to_cache;
 };
 
 struct rb_calling_info {

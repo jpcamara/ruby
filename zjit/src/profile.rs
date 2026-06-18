@@ -101,6 +101,19 @@ fn profile_insn(bare_opcode: ruby_vminsn_type, ec: EcPtr) {
             // can fold respond_to?(:literal) to a constant instead of calling it.
             profile_operands(profiler, profile, argc + 1);
         }
+        YARVINSN_opt_respond_to_symbol | YARVINSN_opt_respond_to_symbol_drop => {
+            profile_operands(profiler, profile, 1);
+        }
+        YARVINSN_opt_respond_to_symbol_branchif | YARVINSN_opt_respond_to_symbol_branchunless => {
+            profile_operands(profiler, profile, 1);
+        }
+        YARVINSN_opt_respond_to_symbol_drop_local |
+        YARVINSN_opt_respond_to_symbol_branchif_local |
+        YARVINSN_opt_respond_to_symbol_branchunless_local => {}
+        YARVINSN_opt_nil_p_and_not_respond_to_symbol_local |
+        YARVINSN_opt_nil_p_and_not_respond_to_symbol_branchunless_local => {
+            profile_operands(profiler, profile, 1);
+        }
         YARVINSN_splatkw => profile_operands(profiler, profile, 2),
         _ => {}
     }

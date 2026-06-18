@@ -1011,6 +1011,227 @@ opt_respond_to
 }
 
 DEFINE_INSN
+opt_respond_to_symbol
+(CALL_DATA cd, CALL_DATA target_cd, CALL_DATA rtm_cd, ID id)
+(VALUE recv)
+(VALUE val)
+{
+    val = vm_opt_respond_to_symbol(GET_CFP(), cd, target_cd, rtm_cd, recv, id);
+}
+
+DEFINE_INSN
+opt_respond_to_symbol_drop
+(CALL_DATA cd, CALL_DATA target_cd, CALL_DATA rtm_cd, ID id)
+(VALUE recv)
+()
+{
+    vm_opt_respond_to_symbol_drop(GET_CFP(), cd, target_cd, rtm_cd, recv, id);
+}
+
+DEFINE_INSN
+opt_respond_to_symbol_drop_local
+(lindex_t idx, rb_num_t level, CALL_DATA cd, CALL_DATA target_cd, CALL_DATA rtm_cd, ID id)
+()
+()
+{
+    VALUE recv = *(vm_get_ep(GET_EP(), level) - idx);
+    RB_DEBUG_COUNTER_INC(lvar_get);
+    (void)RB_DEBUG_COUNTER_INC_IF(lvar_get_dynamic, level > 0);
+    vm_opt_respond_to_symbol_drop(GET_CFP(), cd, target_cd, rtm_cd, recv, id);
+}
+
+DEFINE_INSN
+opt_respond_to_symbol_branchif
+(CALL_DATA cd, CALL_DATA target_cd, CALL_DATA rtm_cd, ID id, ISE cache, OFFSET dst)
+(VALUE recv)
+()
+/* Same discussion as branchif. */
+// attr bool leaf = false; /* has rb_threadptr_execute_interrupts() */
+{
+    VALUE klass = recv == Qnil ? rb_cNilClass : CLASS_OF(recv);
+    int respond_to = vm_opt_respond_to_symbol_cached_result(GET_CFP(), cd, target_cd, rtm_cd, recv, id, klass, cache);
+
+    if (respond_to < 0) {
+        respond_to = vm_opt_respond_to_symbol_p(GET_CFP(), cd, target_cd, rtm_cd, recv, id);
+    }
+
+    if (respond_to) {
+        RUBY_VM_CHECK_INTS(ec);
+        JUMP(dst);
+    }
+}
+
+DEFINE_INSN
+opt_respond_to_symbol_branchunless
+(CALL_DATA cd, CALL_DATA target_cd, CALL_DATA rtm_cd, ID id, ISE cache, OFFSET dst)
+(VALUE recv)
+()
+/* Same discussion as branchunless. */
+// attr bool leaf = false; /* has rb_threadptr_execute_interrupts() */
+{
+    VALUE klass = recv == Qnil ? rb_cNilClass : CLASS_OF(recv);
+    int respond_to = vm_opt_respond_to_symbol_cached_result(GET_CFP(), cd, target_cd, rtm_cd, recv, id, klass, cache);
+
+    if (respond_to < 0) {
+        respond_to = vm_opt_respond_to_symbol_p(GET_CFP(), cd, target_cd, rtm_cd, recv, id);
+    }
+
+    if (!respond_to) {
+        RUBY_VM_CHECK_INTS(ec);
+        JUMP(dst);
+    }
+}
+
+DEFINE_INSN
+opt_respond_to_symbol_branchif_local
+(lindex_t idx, rb_num_t level, CALL_DATA cd, CALL_DATA target_cd, CALL_DATA rtm_cd, ID id, ISE cache, OFFSET dst)
+()
+()
+/* Same discussion as branchif. */
+// attr bool leaf = false; /* has rb_threadptr_execute_interrupts() */
+{
+    VALUE recv = *(vm_get_ep(GET_EP(), level) - idx);
+    RB_DEBUG_COUNTER_INC(lvar_get);
+    (void)RB_DEBUG_COUNTER_INC_IF(lvar_get_dynamic, level > 0);
+    VALUE klass = recv == Qnil ? rb_cNilClass : CLASS_OF(recv);
+    int respond_to = vm_opt_respond_to_symbol_cached_result(GET_CFP(), cd, target_cd, rtm_cd, recv, id, klass, cache);
+
+    if (respond_to < 0) {
+        respond_to = vm_opt_respond_to_symbol_p(GET_CFP(), cd, target_cd, rtm_cd, recv, id);
+    }
+
+    if (respond_to) {
+        RUBY_VM_CHECK_INTS(ec);
+        JUMP(dst);
+    }
+}
+
+DEFINE_INSN
+opt_respond_to_symbol_branchunless_local
+(lindex_t idx, rb_num_t level, CALL_DATA cd, CALL_DATA target_cd, CALL_DATA rtm_cd, ID id, ISE cache, OFFSET dst)
+()
+()
+/* Same discussion as branchunless. */
+// attr bool leaf = false; /* has rb_threadptr_execute_interrupts() */
+{
+    VALUE recv = *(vm_get_ep(GET_EP(), level) - idx);
+    RB_DEBUG_COUNTER_INC(lvar_get);
+    (void)RB_DEBUG_COUNTER_INC_IF(lvar_get_dynamic, level > 0);
+    VALUE klass = recv == Qnil ? rb_cNilClass : CLASS_OF(recv);
+    int respond_to = vm_opt_respond_to_symbol_cached_result(GET_CFP(), cd, target_cd, rtm_cd, recv, id, klass, cache);
+
+    if (respond_to < 0) {
+        respond_to = vm_opt_respond_to_symbol_p(GET_CFP(), cd, target_cd, rtm_cd, recv, id);
+    }
+
+    if (!respond_to) {
+        RUBY_VM_CHECK_INTS(ec);
+        JUMP(dst);
+    }
+}
+
+DEFINE_INSN
+opt_nil_p_and_not_respond_to_symbol_local
+(CALL_DATA nil_cd, lindex_t idx, rb_num_t level, CALL_DATA cd, CALL_DATA target_cd, CALL_DATA rtm_cd, ID id, ISE cache)
+(VALUE nil_recv)
+(VALUE val)
+// attr bool leaf = false; /* may call nil? */
+{
+    VALUE nil_p;
+    if (NIL_P(nil_recv) && BASIC_OP_UNREDEFINED_P(BOP_NIL_P, NIL_REDEFINED_OP_FLAG)) {
+        nil_p = Qtrue;
+    }
+    else if (FIXNUM_P(nil_recv) && BASIC_OP_UNREDEFINED_P(BOP_NIL_P, INTEGER_REDEFINED_OP_FLAG)) {
+        nil_p = Qfalse;
+    }
+    else if (SYMBOL_P(nil_recv) && BASIC_OP_UNREDEFINED_P(BOP_NIL_P, SYMBOL_REDEFINED_OP_FLAG)) {
+        nil_p = Qfalse;
+    }
+    else if (nil_recv == Qtrue && BASIC_OP_UNREDEFINED_P(BOP_NIL_P, TRUE_REDEFINED_OP_FLAG)) {
+        nil_p = Qfalse;
+    }
+    else if (nil_recv == Qfalse && BASIC_OP_UNREDEFINED_P(BOP_NIL_P, FALSE_REDEFINED_OP_FLAG)) {
+        nil_p = Qfalse;
+    }
+    else {
+        nil_p = vm_opt_nil_p(GET_CFP(), nil_cd, nil_recv);
+        if (UNDEF_P(nil_p)) {
+            nil_p = rb_funcallv(nil_recv, idNilP, 0, NULL);
+        }
+    }
+
+    if (!RTEST(nil_p)) {
+        val = Qfalse;
+    }
+    else {
+        VALUE recv = *(vm_get_ep(GET_EP(), level) - idx);
+        RB_DEBUG_COUNTER_INC(lvar_get);
+        (void)RB_DEBUG_COUNTER_INC_IF(lvar_get_dynamic, level > 0);
+        VALUE klass = recv == Qnil ? rb_cNilClass : CLASS_OF(recv);
+        int respond_to = vm_opt_respond_to_symbol_cached_result(GET_CFP(), cd, target_cd, rtm_cd, recv, id, klass, cache);
+
+        if (respond_to < 0) {
+            respond_to = vm_opt_respond_to_symbol_p(GET_CFP(), cd, target_cd, rtm_cd, recv, id);
+        }
+
+        val = RBOOL(!respond_to);
+    }
+}
+
+DEFINE_INSN
+opt_nil_p_and_not_respond_to_symbol_branchunless_local
+(CALL_DATA nil_cd, lindex_t idx, rb_num_t level, CALL_DATA cd, CALL_DATA target_cd, CALL_DATA rtm_cd, ID id, ISE cache, OFFSET dst)
+(VALUE nil_recv)
+()
+/* Same discussion as branchunless. */
+// attr bool leaf = false; /* has rb_threadptr_execute_interrupts() */
+{
+    VALUE nil_p;
+    if (NIL_P(nil_recv) && BASIC_OP_UNREDEFINED_P(BOP_NIL_P, NIL_REDEFINED_OP_FLAG)) {
+        nil_p = Qtrue;
+    }
+    else if (FIXNUM_P(nil_recv) && BASIC_OP_UNREDEFINED_P(BOP_NIL_P, INTEGER_REDEFINED_OP_FLAG)) {
+        nil_p = Qfalse;
+    }
+    else if (SYMBOL_P(nil_recv) && BASIC_OP_UNREDEFINED_P(BOP_NIL_P, SYMBOL_REDEFINED_OP_FLAG)) {
+        nil_p = Qfalse;
+    }
+    else if (nil_recv == Qtrue && BASIC_OP_UNREDEFINED_P(BOP_NIL_P, TRUE_REDEFINED_OP_FLAG)) {
+        nil_p = Qfalse;
+    }
+    else if (nil_recv == Qfalse && BASIC_OP_UNREDEFINED_P(BOP_NIL_P, FALSE_REDEFINED_OP_FLAG)) {
+        nil_p = Qfalse;
+    }
+    else {
+        nil_p = vm_opt_nil_p(GET_CFP(), nil_cd, nil_recv);
+        if (UNDEF_P(nil_p)) {
+            nil_p = rb_funcallv(nil_recv, idNilP, 0, NULL);
+        }
+    }
+
+    if (!RTEST(nil_p)) {
+        RUBY_VM_CHECK_INTS(ec);
+        JUMP(dst);
+    }
+    else {
+        VALUE recv = *(vm_get_ep(GET_EP(), level) - idx);
+        RB_DEBUG_COUNTER_INC(lvar_get);
+        (void)RB_DEBUG_COUNTER_INC_IF(lvar_get_dynamic, level > 0);
+        VALUE klass = recv == Qnil ? rb_cNilClass : CLASS_OF(recv);
+        int respond_to = vm_opt_respond_to_symbol_cached_result(GET_CFP(), cd, target_cd, rtm_cd, recv, id, klass, cache);
+
+        if (respond_to < 0) {
+            respond_to = vm_opt_respond_to_symbol_p(GET_CFP(), cd, target_cd, rtm_cd, recv, id);
+        }
+
+        if (respond_to) {
+            RUBY_VM_CHECK_INTS(ec);
+            JUMP(dst);
+        }
+    }
+}
+
+DEFINE_INSN
 opt_str_freeze
 (VALUE str, CALL_DATA cd)
 ()

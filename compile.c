@@ -43,12 +43,25 @@
 #include "vm_callinfo.h"
 #include "vm_debug.h"
 #include "yjit.h"
+#include "zjit.h"
 
 #include "builtin.h"
 #include "insns.inc"
 #include "insns_info.inc"
 
 #define FIXNUM_INC(n, i) ((n)+(INT2FIX(i)&~FIXNUM_FLAG))
+
+static inline bool
+opt_respond_to_symbol_enabled_p(void)
+{
+    return !rb_yjit_enabled_p && !rb_zjit_enabled_p;
+}
+
+static inline bool
+opt_respond_to_symbol_nil_combo_enabled_p(void)
+{
+    return !rb_yjit_enabled_p && !rb_zjit_enabled_p;
+}
 
 typedef struct iseq_link_element {
     enum {
@@ -357,6 +370,30 @@ static void iseq_add_setlocal(rb_iseq_t *iseq, LINK_ANCHOR *const seq, const NOD
 #define IS_INSN_ID(iobj, insn) (INSN_OF(iobj) == BIN(insn))
 #define IS_NEXT_INSN_ID(link, insn) \
     ((link)->next && IS_INSN((link)->next) && IS_INSN_ID((link)->next, insn))
+
+static inline bool
+getlocal_operands(INSN *insn, VALUE *idx, VALUE *level)
+{
+    if (!insn) return false;
+
+    if (IS_INSN_ID(insn, getlocal_WC_0)) {
+        *idx = OPERAND_AT(insn, 0);
+        *level = INT2FIX(0);
+        return true;
+    }
+    else if (IS_INSN_ID(insn, getlocal_WC_1)) {
+        *idx = OPERAND_AT(insn, 0);
+        *level = INT2FIX(1);
+        return true;
+    }
+    else if (IS_INSN_ID(insn, getlocal)) {
+        *idx = OPERAND_AT(insn, 0);
+        *level = OPERAND_AT(insn, 1);
+        return true;
+    }
+
+    return false;
+}
 
 /* error */
 #if CPDEBUG > 0
@@ -2385,6 +2422,12 @@ get_ivar_ic_value(rb_iseq_t *iseq,ID id)
 }
 
 static inline VALUE
+get_respond_to_cache_value(rb_iseq_t *iseq)
+{
+    return INT2FIX(ISEQ_BODY(iseq)->ise_size++);
+}
+
+static inline VALUE
 get_cvar_ic_value(rb_iseq_t *iseq,ID id)
 {
     VALUE val;
@@ -3598,6 +3641,227 @@ iseq_peephole_optimize(rb_iseq_t *iseq, LINK_ELEMENT *list, const int do_tailcal
     }
 
     /*
+     * putobject :foo
+     * send     <calldata!mid:respond_to?, argc:1, ARGS_SIMPLE>
+     * =>
+     * opt_respond_to_symbol <calldata!mid:respond_to?, argc:1, ARGS_SIMPLE>,
+     *                       <calldata!mid:foo, argc:0, ARGS_SIMPLE>,
+     *                       <calldata!mid:respond_to_missing?, argc:2, ARGS_SIMPLE>,
+     *                       :foo
+     */
+    if (opt_respond_to_symbol_enabled_p() && IS_INSN_ID(iobj, send)) {
+        const struct rb_callinfo *ci = (struct rb_callinfo *)OPERAND_AT(iobj, 0);
+        const rb_iseq_t *blockiseq = (rb_iseq_t *)OPERAND_AT(iobj, 1);
+
+        if (vm_ci_simple(ci) && blockiseq == NULL && vm_ci_mid(ci) == idRespond_to &&
+            vm_ci_argc(ci) == 1) {
+            INSN *prev = (INSN *)get_prev_insn(iobj);
+
+            if (prev && IS_INSN_ID(prev, putobject) && !insn_has_label_before(&prev->link)) {
+                VALUE mid = OPERAND_AT(prev, 0);
+
+                if (STATIC_SYM_P(mid)) {
+                    const struct rb_callinfo *target_ci = new_callinfo(iseq, SYM2ID(mid), 0, 0, NULL, FALSE);
+                    const struct rb_callinfo *rtm_ci = new_callinfo(iseq, idRespond_to_missing, 2, 0, NULL, FALSE);
+                    LINK_ELEMENT *next = iobj->link.next;
+                    INSN *recv = NULL;
+
+                    if (IS_INSN(next) && IS_INSN_ID(next, opt_not) && !insn_has_label_before(next)) {
+                        LINK_ELEMENT *next2 = next->next;
+
+                        if (IS_INSN(next2) &&
+                            (IS_INSN_ID(next2, branchif) || IS_INSN_ID(next2, branchunless)) &&
+                            !insn_has_label_before(next2)) {
+                            enum ruby_vminsn_type branch_insn = IS_INSN_ID(next2, branchif) ?
+                                BIN(opt_respond_to_symbol_branchunless) :
+                                BIN(opt_respond_to_symbol_branchif);
+                            enum ruby_vminsn_type branch_local_insn = IS_INSN_ID(next2, branchif) ?
+                                BIN(opt_respond_to_symbol_branchunless_local) :
+                                BIN(opt_respond_to_symbol_branchif_local);
+                            VALUE dst = OPERAND_AT((INSN *)next2, 0);
+
+                            recv = (INSN *)get_prev_insn(prev);
+                            VALUE idx, level;
+                            if (getlocal_operands(recv, &idx, &level)) {
+                                ELEM_REMOVE(next2);
+                                ELEM_REMOVE(next);
+                                ELEM_REMOVE(&prev->link);
+                                ELEM_REMOVE(&iobj->link);
+                                insn_replace_with_operands(iseq, recv, branch_local_insn, 8,
+                                                           idx, level, (VALUE)ci, (VALUE)target_ci, (VALUE)rtm_ci, mid,
+                                                           get_respond_to_cache_value(iseq), dst);
+                                return COMPILE_OK;
+                            }
+
+                            ELEM_REMOVE(next2);
+                            ELEM_REMOVE(next);
+                            ELEM_REMOVE(&prev->link);
+                            insn_replace_with_operands(iseq, iobj, branch_insn, 6,
+                                                       (VALUE)ci, (VALUE)target_ci, (VALUE)rtm_ci, mid,
+                                                       get_respond_to_cache_value(iseq), dst);
+                            return COMPILE_OK;
+                        }
+                    }
+
+                    if (IS_INSN(next) &&
+                        (IS_INSN_ID(next, branchif) || IS_INSN_ID(next, branchunless)) &&
+                        !insn_has_label_before(next)) {
+                        enum ruby_vminsn_type branch_insn = IS_INSN_ID(next, branchif) ?
+                            BIN(opt_respond_to_symbol_branchif) :
+                            BIN(opt_respond_to_symbol_branchunless);
+                        enum ruby_vminsn_type branch_local_insn = IS_INSN_ID(next, branchif) ?
+                            BIN(opt_respond_to_symbol_branchif_local) :
+                            BIN(opt_respond_to_symbol_branchunless_local);
+                        VALUE dst = OPERAND_AT((INSN *)next, 0);
+
+                        recv = (INSN *)get_prev_insn(prev);
+                        VALUE idx, level;
+                        if (getlocal_operands(recv, &idx, &level)) {
+                            ELEM_REMOVE(next);
+                            ELEM_REMOVE(&prev->link);
+                            ELEM_REMOVE(&iobj->link);
+                            insn_replace_with_operands(iseq, recv, branch_local_insn, 8,
+                                                       idx, level, (VALUE)ci, (VALUE)target_ci, (VALUE)rtm_ci, mid,
+                                                       get_respond_to_cache_value(iseq), dst);
+                            return COMPILE_OK;
+                        }
+
+                        ELEM_REMOVE(next);
+                        ELEM_REMOVE(&prev->link);
+                        insn_replace_with_operands(iseq, iobj, branch_insn, 6,
+                                                   (VALUE)ci, (VALUE)target_ci, (VALUE)rtm_ci, mid,
+                                                   get_respond_to_cache_value(iseq), dst);
+                        return COMPILE_OK;
+                    }
+
+                    if (IS_INSN(next) && IS_INSN_ID(next, pop) && !insn_has_label_before(next)) {
+                        recv = (INSN *)get_prev_insn(prev);
+                        VALUE idx, level;
+                        if (getlocal_operands(recv, &idx, &level)) {
+                            ELEM_REMOVE(next);
+                            ELEM_REMOVE(&prev->link);
+                            ELEM_REMOVE(&iobj->link);
+                            insn_replace_with_operands(iseq, recv, BIN(opt_respond_to_symbol_drop_local), 6,
+                                                       idx, level, (VALUE)ci, (VALUE)target_ci, (VALUE)rtm_ci, mid);
+                            return COMPILE_OK;
+                        }
+
+                        ELEM_REMOVE(next);
+                        ELEM_REMOVE(&prev->link);
+                        insn_replace_with_operands(iseq, iobj, BIN(opt_respond_to_symbol_drop), 4,
+                                                   (VALUE)ci, (VALUE)target_ci, (VALUE)rtm_ci, mid);
+                        return COMPILE_OK;
+                    }
+
+                    if (IS_INSN(next) && IS_INSN_ID(next, opt_not) && !insn_has_label_before(next)) {
+                        ELEM_REMOVE(&prev->link);
+                        insn_replace_with_operands(iseq, iobj, BIN(opt_respond_to_symbol), 4,
+                                                   (VALUE)ci, (VALUE)target_ci, (VALUE)rtm_ci, mid);
+                        return COMPILE_OK;
+                    }
+                }
+            }
+        }
+    }
+
+    if (opt_respond_to_symbol_enabled_p() && IS_INSN_ID(iobj, opt_respond_to_symbol)) {
+        LINK_ELEMENT *next = iobj->link.next;
+
+        if (IS_INSN(next) && IS_INSN_ID(next, opt_not) && !insn_has_label_before(next)) {
+            LINK_ELEMENT *next2 = next->next;
+
+            if (IS_INSN(next2) &&
+                (IS_INSN_ID(next2, branchif) || IS_INSN_ID(next2, branchunless)) &&
+                !insn_has_label_before(next2)) {
+                const struct rb_callinfo *ci = (struct rb_callinfo *)OPERAND_AT(iobj, 0);
+                const struct rb_callinfo *target_ci = (struct rb_callinfo *)OPERAND_AT(iobj, 1);
+                const struct rb_callinfo *rtm_ci = (struct rb_callinfo *)OPERAND_AT(iobj, 2);
+                VALUE mid = OPERAND_AT(iobj, 3);
+                enum ruby_vminsn_type branch_insn = IS_INSN_ID(next2, branchif) ?
+                    BIN(opt_respond_to_symbol_branchunless) :
+                    BIN(opt_respond_to_symbol_branchif);
+                enum ruby_vminsn_type branch_local_insn = IS_INSN_ID(next2, branchif) ?
+                    BIN(opt_respond_to_symbol_branchunless_local) :
+                    BIN(opt_respond_to_symbol_branchif_local);
+                VALUE dst = OPERAND_AT((INSN *)next2, 0);
+                INSN *recv = (INSN *)get_prev_insn(iobj);
+
+                VALUE idx, level;
+                if (getlocal_operands(recv, &idx, &level)) {
+                    ELEM_REMOVE(next2);
+                    ELEM_REMOVE(next);
+                    ELEM_REMOVE(&iobj->link);
+                    insn_replace_with_operands(iseq, recv, branch_local_insn, 8,
+                                               idx, level, (VALUE)ci, (VALUE)target_ci, (VALUE)rtm_ci, mid,
+                                               get_respond_to_cache_value(iseq), dst);
+                    return COMPILE_OK;
+                }
+
+                ELEM_REMOVE(next2);
+                ELEM_REMOVE(next);
+                insn_replace_with_operands(iseq, iobj, branch_insn, 6,
+                                           (VALUE)ci, (VALUE)target_ci, (VALUE)rtm_ci, mid,
+                                           get_respond_to_cache_value(iseq), dst);
+                return COMPILE_OK;
+            }
+        }
+    }
+
+    if (opt_respond_to_symbol_nil_combo_enabled_p() && IS_INSN_ID(iobj, opt_respond_to_symbol_branchif_local)) {
+        INSN *branch = (INSN *)get_prev_insn(iobj);
+
+        if (branch && IS_INSN_ID(branch, branchunless) &&
+            OPERAND_AT(branch, 0) == OPERAND_AT(iobj, 7) &&
+            !insn_has_label_before(&iobj->link) &&
+            !insn_has_label_before(&branch->link)) {
+            INSN *nil_p = (INSN *)get_prev_insn(branch);
+
+            if (nil_p && IS_INSN_ID(nil_p, opt_nil_p) && !insn_has_label_before(&nil_p->link)) {
+                CALL_DATA nil_cd = (CALL_DATA)OPERAND_AT(nil_p, 0);
+                VALUE recv_idx = OPERAND_AT(iobj, 0);
+                VALUE recv_level = OPERAND_AT(iobj, 1);
+                const struct rb_callinfo *ci = (struct rb_callinfo *)OPERAND_AT(iobj, 2);
+                const struct rb_callinfo *target_ci = (struct rb_callinfo *)OPERAND_AT(iobj, 3);
+                const struct rb_callinfo *rtm_ci = (struct rb_callinfo *)OPERAND_AT(iobj, 4);
+                VALUE mid = OPERAND_AT(iobj, 5);
+                VALUE cache = OPERAND_AT(iobj, 6);
+                VALUE dst = OPERAND_AT(iobj, 7);
+
+                ELEM_REMOVE(&iobj->link);
+                ELEM_REMOVE(&branch->link);
+                insn_replace_with_operands(iseq, nil_p, BIN(opt_nil_p_and_not_respond_to_symbol_branchunless_local), 9,
+                                           (VALUE)nil_cd, recv_idx, recv_level, (VALUE)ci,
+                                           (VALUE)target_ci, (VALUE)rtm_ci, mid, cache, dst);
+                return COMPILE_OK;
+            }
+        }
+    }
+
+    if (opt_respond_to_symbol_nil_combo_enabled_p() &&
+        IS_INSN_ID(iobj, opt_nil_p_and_not_respond_to_symbol_local)) {
+        LINK_ELEMENT *next = iobj->link.next;
+
+        if (IS_INSN(next) && IS_INSN_ID(next, branchunless) &&
+            !insn_has_label_before(next)) {
+            CALL_DATA nil_cd = (CALL_DATA)OPERAND_AT(iobj, 0);
+            VALUE recv_idx = OPERAND_AT(iobj, 1);
+            VALUE recv_level = OPERAND_AT(iobj, 2);
+            const struct rb_callinfo *ci = (struct rb_callinfo *)OPERAND_AT(iobj, 3);
+            const struct rb_callinfo *target_ci = (struct rb_callinfo *)OPERAND_AT(iobj, 4);
+            const struct rb_callinfo *rtm_ci = (struct rb_callinfo *)OPERAND_AT(iobj, 5);
+            VALUE mid = OPERAND_AT(iobj, 6);
+            VALUE cache = OPERAND_AT(iobj, 7);
+            VALUE dst = OPERAND_AT((INSN *)next, 0);
+
+            ELEM_REMOVE(next);
+            insn_replace_with_operands(iseq, iobj, BIN(opt_nil_p_and_not_respond_to_symbol_branchunless_local), 9,
+                                       (VALUE)nil_cd, recv_idx, recv_level, (VALUE)ci,
+                                       (VALUE)target_ci, (VALUE)rtm_ci, mid, cache, dst);
+            return COMPILE_OK;
+        }
+    }
+
+    /*
      * send     <calldata!mid:respond_to?, argc:1..2, ARGS_SIMPLE>
      * =>
      * opt_respond_to <calldata!mid:respond_to?, argc:1..2, ARGS_SIMPLE>
@@ -4385,6 +4649,94 @@ iseq_specialized_instruction(rb_iseq_t *iseq, INSN *iobj)
     if (IS_INSN_ID(iobj, send)) {
         const struct rb_callinfo *ci = (struct rb_callinfo *)OPERAND_AT(iobj, 0);
         const rb_iseq_t *blockiseq = (rb_iseq_t *)OPERAND_AT(iobj, 1);
+
+        if (opt_respond_to_symbol_enabled_p() && vm_ci_simple(ci) && vm_ci_argc(ci) == 0 && blockiseq == NULL && vm_ci_mid(ci) == idNot) {
+            INSN *prev = (INSN *)get_prev_insn(iobj);
+            LINK_ELEMENT *next = iobj->link.next;
+
+            if (prev && IS_INSN_ID(prev, opt_respond_to) && !insn_has_label_before(&prev->link)) {
+                INSN *sym_insn = (INSN *)get_prev_insn(prev);
+
+                if (sym_insn && IS_INSN_ID(sym_insn, putobject) && !insn_has_label_before(&sym_insn->link)) {
+                    VALUE mid = OPERAND_AT(sym_insn, 0);
+
+                    if (STATIC_SYM_P(mid)) {
+                        const struct rb_callinfo *respond_to_ci = (struct rb_callinfo *)OPERAND_AT(prev, 0);
+                        const struct rb_callinfo *target_ci = new_callinfo(iseq, SYM2ID(mid), 0, 0, NULL, FALSE);
+                        const struct rb_callinfo *rtm_ci = new_callinfo(iseq, idRespond_to_missing, 2, 0, NULL, FALSE);
+
+                        ELEM_REMOVE(&sym_insn->link);
+                        insn_replace_with_operands(iseq, prev, BIN(opt_respond_to_symbol), 4,
+                                                   (VALUE)respond_to_ci, (VALUE)target_ci, (VALUE)rtm_ci, mid);
+                    }
+                }
+            }
+
+            if (prev && IS_INSN_ID(prev, opt_respond_to_symbol) &&
+                IS_INSN(next) &&
+                (IS_INSN_ID(next, branchif) || IS_INSN_ID(next, branchunless)) &&
+                !insn_has_label_before(&iobj->link) &&
+                !insn_has_label_before(next)) {
+                const struct rb_callinfo *respond_to_ci = (struct rb_callinfo *)OPERAND_AT(prev, 0);
+                const struct rb_callinfo *target_ci = (struct rb_callinfo *)OPERAND_AT(prev, 1);
+                const struct rb_callinfo *rtm_ci = (struct rb_callinfo *)OPERAND_AT(prev, 2);
+                VALUE mid = OPERAND_AT(prev, 3);
+                enum ruby_vminsn_type branch_insn = IS_INSN_ID(next, branchif) ?
+                    BIN(opt_respond_to_symbol_branchunless) :
+                    BIN(opt_respond_to_symbol_branchif);
+                enum ruby_vminsn_type branch_local_insn = IS_INSN_ID(next, branchif) ?
+                    BIN(opt_respond_to_symbol_branchunless_local) :
+                    BIN(opt_respond_to_symbol_branchif_local);
+                VALUE dst = OPERAND_AT((INSN *)next, 0);
+                INSN *recv = (INSN *)get_prev_insn(prev);
+
+                VALUE idx, level;
+                if (getlocal_operands(recv, &idx, &level)) {
+                    if (opt_respond_to_symbol_nil_combo_enabled_p() &&
+                        branch_local_insn == BIN(opt_respond_to_symbol_branchif_local)) {
+                        INSN *guard_branch = (INSN *)get_prev_insn(recv);
+
+                        if (guard_branch && IS_INSN_ID(guard_branch, branchunless) &&
+                            OPERAND_AT(guard_branch, 0) == dst &&
+                            !insn_has_label_before(&recv->link) &&
+                            !insn_has_label_before(&guard_branch->link)) {
+                            INSN *nil_p = (INSN *)get_prev_insn(guard_branch);
+
+                            if (nil_p && IS_INSN_ID(nil_p, opt_nil_p) &&
+                                !insn_has_label_before(&nil_p->link)) {
+                                CALL_DATA nil_cd = (CALL_DATA)OPERAND_AT(nil_p, 0);
+
+                                ELEM_REMOVE(next);
+                                ELEM_REMOVE(&iobj->link);
+                                ELEM_REMOVE(&prev->link);
+                                ELEM_REMOVE(&recv->link);
+                                ELEM_REMOVE(&guard_branch->link);
+                                insn_replace_with_operands(iseq, nil_p, BIN(opt_nil_p_and_not_respond_to_symbol_branchunless_local), 9,
+                                                           (VALUE)nil_cd, idx, level, (VALUE)respond_to_ci,
+                                                           (VALUE)target_ci, (VALUE)rtm_ci, mid,
+                                                           get_respond_to_cache_value(iseq), dst);
+                                return COMPILE_OK;
+                            }
+                        }
+                    }
+
+                    ELEM_REMOVE(next);
+                    ELEM_REMOVE(&iobj->link);
+                    ELEM_REMOVE(&prev->link);
+                    insn_replace_with_operands(iseq, recv, branch_local_insn, 8,
+                                               idx, level, (VALUE)respond_to_ci, (VALUE)target_ci, (VALUE)rtm_ci, mid,
+                                               get_respond_to_cache_value(iseq), dst);
+                    return COMPILE_OK;
+                }
+
+                ELEM_REMOVE(next);
+                ELEM_REMOVE(&iobj->link);
+                insn_replace_with_operands(iseq, prev, branch_insn, 6,
+                                           (VALUE)respond_to_ci, (VALUE)target_ci, (VALUE)rtm_ci, mid,
+                                           get_respond_to_cache_value(iseq), dst);
+                return COMPILE_OK;
+            }
+        }
 
 #define SP_INSN(opt) insn_set_specialized_instruction(iseq, iobj, BIN(opt_##opt))
         if (vm_ci_simple(ci)) {

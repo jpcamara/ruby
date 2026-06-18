@@ -7270,7 +7270,9 @@ impl ProfileOracle {
         // operand_types is always going to be <= stack size (otherwise it would have an underflow
         // at run-time) so use that to drive iteration.
         for (idx, insn_type_distribution) in operand_types.iter().rev().enumerate() {
-            let insn = state.stack_topn(idx).expect("Unexpected stack underflow in profiling");
+            let Ok(insn) = state.stack_topn(idx) else {
+                break;
+            };
             entry.push((insn, TypeDistributionSummary::new(insn_type_distribution)))
         }
     }
@@ -8009,6 +8011,18 @@ fn add_iseq_to_hir(
                     let nil_false = fun.push_insn(block, Insn::RefineType { val, new_type: nil_false_type });
                     state.replace(val, nil_false);
                     queue.push_back((state.clone(), target, target_idx, local_inval));
+                }
+                YARVINSN_opt_respond_to_symbol |
+                YARVINSN_opt_respond_to_symbol_drop |
+                YARVINSN_opt_respond_to_symbol_drop_local |
+                YARVINSN_opt_respond_to_symbol_branchif |
+                YARVINSN_opt_respond_to_symbol_branchunless |
+                YARVINSN_opt_respond_to_symbol_branchif_local |
+                YARVINSN_opt_respond_to_symbol_branchunless_local |
+                YARVINSN_opt_nil_p_and_not_respond_to_symbol_local |
+                YARVINSN_opt_nil_p_and_not_respond_to_symbol_branchunless_local => {
+                    fun.push_insn(block, Insn::SideExit { state: exit_id, reason: SideExitReason::UnhandledYARVInsn(opcode), recompile: None });
+                    break;
                 }
                 YARVINSN_branchnil | YARVINSN_branchnil_without_ints => {
                     if opcode == YARVINSN_branchnil {

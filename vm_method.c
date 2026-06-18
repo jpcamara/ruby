@@ -596,6 +596,8 @@ clear_iclass_method_cache_by_id_for_refinements(VALUE klass, VALUE d)
 void
 rb_clear_method_cache(VALUE klass_or_module, ID mid)
 {
+    ruby_vm_global_method_state += 2;
+
     if (RB_TYPE_P(klass_or_module, T_MODULE)) {
         VALUE module = klass_or_module; // alias
 
@@ -631,6 +633,8 @@ invalidate_ccs_in_iclass_cc_tbl(VALUE value, void *data)
 void
 rb_invalidate_method_caches(struct rb_id_table *cm_tbl, VALUE cc_tbl)
 {
+    ruby_vm_global_method_state += 2;
+
     if (cm_tbl) {
         rb_id_table_foreach_values(cm_tbl, invalidate_method_entry_in_iclass_callable_m_tbl, NULL);
     }
@@ -1437,6 +1441,7 @@ rb_method_entry_make(VALUE klass, ID mid, VALUE defined_class, rb_method_visibil
     rb_method_entry_t *me;
     struct rb_id_table *mtbl;
     st_data_t data;
+    bool method_table_has_entry;
     int make_refined = 0;
     VALUE orig_klass;
     bool turn_zsuper_to_super = false;
@@ -1483,7 +1488,8 @@ rb_method_entry_make(VALUE klass, ID mid, VALUE defined_class, rb_method_visibil
     mtbl = RCLASS_WRITABLE_M_TBL(klass);
 
     /* check re-definition */
-    if (rb_id_table_lookup(mtbl, mid, &data)) {
+    method_table_has_entry = rb_id_table_lookup(mtbl, mid, &data);
+    if (method_table_has_entry) {
         rb_method_entry_t *old_me = (rb_method_entry_t *)data;
         rb_method_definition_t *old_def = old_me->def;
 
@@ -1525,6 +1531,10 @@ rb_method_entry_make(VALUE klass, ID mid, VALUE defined_class, rb_method_visibil
                 rb_warning("method redefined; discarding old %"PRIsVALUE, rb_id2str(mid));
             }
         }
+    }
+    else if (rb_vm_check_optimizable_mid(mid)) {
+        const rb_method_entry_t *old_me = rb_method_entry(klass, mid);
+        if (old_me) rb_vm_check_redefinition_opt_method(old_me, klass);
     }
 
     /* create method entry */

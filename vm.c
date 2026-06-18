@@ -723,6 +723,7 @@ unsigned int    ruby_vm_iseq_events_enabled = 0;
 rb_serial_t ruby_vm_constant_cache_invalidations = 0;
 rb_serial_t ruby_vm_constant_cache_misses = 0;
 rb_serial_t ruby_vm_global_cvar_state = 1;
+rb_serial_t ruby_vm_global_method_state = 2;
 
 static const struct rb_callcache vm_empty_cc = {
     .flags = T_IMEMO | (imemo_callcache << FL_USHIFT) | VM_CALLCACHE_UNMARKABLE,
@@ -2316,6 +2317,19 @@ vm_redefinition_check_flag(VALUE klass)
     if (klass == rb_cTrueClass) return TRUE_REDEFINED_OP_FLAG;
     if (klass == rb_cFalseClass) return FALSE_REDEFINED_OP_FLAG;
     if (klass == rb_cProc) return PROC_REDEFINED_OP_FLAG;
+    if (klass == rb_cObject || klass == rb_mKernel) {
+        return INTEGER_REDEFINED_OP_FLAG |
+               FLOAT_REDEFINED_OP_FLAG |
+               STRING_REDEFINED_OP_FLAG |
+               ARRAY_REDEFINED_OP_FLAG |
+               HASH_REDEFINED_OP_FLAG |
+               SYMBOL_REDEFINED_OP_FLAG |
+               REGEXP_REDEFINED_OP_FLAG |
+               NIL_REDEFINED_OP_FLAG |
+               TRUE_REDEFINED_OP_FLAG |
+               FALSE_REDEFINED_OP_FLAG |
+               PROC_REDEFINED_OP_FLAG;
+    }
     return 0;
 }
 
@@ -2465,9 +2479,12 @@ vm_init_redefined_flag(void)
     OP(And, AND), (C(Integer));
     OP(Or, OR), (C(Integer));
     OP(NilP, NIL_P), (C(NilClass));
+    OP(NilP, NIL_P), (add_opt_method(rb_mKernel, mid, bop));
     OP(Cmp, CMP), (C(Integer), C(Float), C(String));
     OP(Default, DEFAULT), (C(Hash));
     OP(IncludeP, INCLUDE_P), (C(Array));
+    OP(Respond_to, RESPOND_TO), (add_opt_method(rb_mKernel, mid, bop));
+    OP(Respond_to_missing, RESPOND_TO), (add_opt_method(rb_mKernel, mid, bop));
 #undef C
 #undef OP
 }
@@ -2508,6 +2525,8 @@ vm_redefinition_bop_for_id(ID mid)
     OP(Cmp, CMP);
     OP(Default, DEFAULT);
     OP(Pack, PACK);
+    OP(Respond_to, RESPOND_TO);
+    OP(Respond_to_missing, RESPOND_TO);
 #undef OP
     }
     return -1;

@@ -1275,4 +1275,191 @@ class TestRubyOptimization < Test::Unit::TestCase
       assert_no_match(/opt_new/, insn)
     end
   end
+
+  def test_opt_respond_to_symbol_instruction_selection
+    disasm = RubyVM::InstructionSequence.compile("def opt_respond_to_symbol_test(obj); obj.respond_to?(:to_io); end").disasm
+    branch_disasm = RubyVM::InstructionSequence.compile(<<~RUBY).disasm
+      def opt_respond_to_symbol_branch_test(obj, limit)
+        if obj.respond_to?(:to_io)
+          1
+        elsif limit.nil? && !obj.respond_to?(:write)
+          2
+        else
+          3
+        end
+      end
+    RUBY
+
+    if (defined?(RubyVM::YJIT) && RubyVM::YJIT.enabled?) ||
+       (defined?(RubyVM::ZJIT) && RubyVM::ZJIT.enabled?)
+      assert_no_match(/^\d+ opt_respond_to_symbol/, disasm)
+      assert_no_match(/^\d+ opt_respond_to_symbol/, branch_disasm)
+      assert_match(/^\d+ opt_respond_to\b/, disasm)
+      assert_match(/^\d+ opt_respond_to\b/, branch_disasm)
+    else
+      assert_no_match(/^\d+ opt_respond_to_symbol\b/, disasm)
+      assert_match(/^\d+ opt_respond_to\b/, disasm)
+      assert_match(/^\d+ opt_respond_to_symbol_branchunless_local/, branch_disasm)
+      assert_match(/^\d+ opt_nil_p_and_not_respond_to_symbol_branchunless_local/, branch_disasm)
+      assert_no_match(/^\d+ opt_nil_p_and_not_respond_to_symbol_local\b/, branch_disasm)
+    end
+  end
+
+  def test_opt_respond_to_symbol_semantics
+    responder = RubyVM::InstructionSequence.compile("-> obj { obj.respond_to?(:ghost) }").eval
+    writer = RubyVM::InstructionSequence.compile("-> obj { obj.respond_to?(:write) }").eval
+    negated_writer = RubyVM::InstructionSequence.compile("-> obj { !obj.respond_to?(:write) }").eval
+    branch = RubyVM::InstructionSequence.compile(<<~RUBY).eval
+      -> obj, limit {
+        if obj.respond_to?(:to_io)
+          1
+        elsif limit.nil? && !obj.respond_to?(:write)
+          2
+        else
+          3
+        end
+      }
+    RUBY
+
+    assert_equal(false, responder.call(nil))
+    assert_equal(false, writer.call(nil))
+    assert_equal(true, negated_writer.call(nil))
+    assert_equal(2, branch.call(nil, nil))
+
+    ghost_class = Class.new do
+      def respond_to_missing?(name, include_private = false)
+        name == :ghost || super
+      end
+    end
+    assert_equal(true, responder.call(ghost_class.new))
+
+    private_class = Class.new do
+      private def ghost
+      end
+    end
+    assert_equal(false, responder.call(private_class.new))
+
+    override_class = Class.new do
+      attr_reader :seen
+
+      def initialize
+        @seen = 0
+      end
+
+      def respond_to?(name, include_private = false)
+        @seen += 1
+        name == :ghost
+      end
+    end
+    override = override_class.new
+    assert_equal(true, responder.call(override))
+    assert_equal(1, override.seen)
+
+    nil_like = Class.new do
+      attr_reader :seen
+
+      def initialize(result)
+        @result = result
+        @seen = 0
+      end
+
+      def nil?
+        @seen += 1
+        @result
+      end
+    end
+
+    true_nil_like = nil_like.new(true)
+    false_nil_like = nil_like.new(false)
+    assert_equal(2, branch.call(nil, true_nil_like))
+    assert_equal(1, true_nil_like.seen)
+    assert_equal(3, branch.call(nil, false_nil_like))
+    assert_equal(1, false_nil_like.seen)
+  end
+
+  def test_opt_respond_to_symbol_nilclass_redefinition
+    assert_separately([], "#{<<~"begin;"}\n#{<<~'end;'}")
+    begin;
+      responder = RubyVM::InstructionSequence.compile("-> { nil.respond_to?(:write) }").eval
+      10.times { assert_equal(false, responder.call) }
+
+      class NilClass
+        def respond_to?(mid, include_private = false)
+          mid == :write || super
+        end
+      end
+
+      assert_equal(true, responder.call)
+    end;
+  end
+
+  def test_opt_respond_to_symbol_late_respond_to_missing_definition
+    assert_separately([], "#{<<~"begin;"}\n#{<<~'end;'}")
+    begin;
+      klass = Class.new
+      responder = RubyVM::InstructionSequence.compile("-> obj { obj.respond_to?(:ghost) ? :yes : :no }").eval
+
+      10.times { assert_equal(:no, responder.call(klass.new)) }
+
+      klass.class_eval do
+        def respond_to_missing?(mid, include_private = false)
+          mid == :ghost || super
+        end
+      end
+
+      assert_equal(:yes, responder.call(klass.new))
+    end;
+  end
+
+  def test_opt_respond_to_symbol_kernel_redefinition
+    assert_separately([], "#{<<~"begin;"}\n#{<<~'end;'}")
+    begin;
+      branch = RubyVM::InstructionSequence.compile(<<~RUBY).eval
+        -> obj, limit {
+          if obj.respond_to?(:to_io)
+            1
+          elsif limit.nil? && !obj.respond_to?(:write)
+            2
+          else
+            3
+          end
+        }
+      RUBY
+      10.times { assert_equal(2, branch.call(nil, nil)) }
+
+      module Kernel
+        def respond_to_missing?(mid, include_private = false)
+          mid == :write
+        end
+      end
+
+      assert_equal(3, branch.call(nil, nil))
+    end;
+  end
+
+  def test_opt_nil_p_integer_redefinition
+    assert_separately([], "#{<<~"begin;"}\n#{<<~'end;'}")
+    begin;
+      branch = RubyVM::InstructionSequence.compile(<<~RUBY).eval
+        -> obj, limit {
+          if obj.respond_to?(:to_io)
+            1
+          elsif limit.nil? && !obj.respond_to?(:write)
+            2
+          else
+            3
+          end
+        }
+      RUBY
+      10.times { assert_equal(3, branch.call(nil, 1)) }
+
+      class Integer
+        def nil?
+          true
+        end
+      end
+
+      assert_equal(2, branch.call(nil, 1))
+    end;
+  end
 end

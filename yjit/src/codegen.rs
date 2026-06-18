@@ -4802,6 +4802,68 @@ fn gen_branchunless(
     Some(EndBlock)
 }
 
+fn gen_branch_on_stack_value(
+    jit: &mut JITState,
+    asm: &mut Assembler,
+    jump_offset: i32,
+    branch_if: bool,
+) -> Option<CodegenStatus> {
+    if jump_offset < 0 {
+        let counter = if branch_if {
+            Counter::branchif_interrupted
+        } else {
+            Counter::branchunless_interrupted
+        };
+        gen_check_ints(asm, counter);
+    }
+
+    let next_idx = jit.next_insn_idx() as i32;
+    let jump_idx = next_idx + jump_offset;
+    let next_block = BlockId {
+        iseq: jit.iseq,
+        idx: next_idx.try_into().unwrap(),
+    };
+    let jump_block = BlockId {
+        iseq: jit.iseq,
+        idx: jump_idx.try_into().unwrap(),
+    };
+
+    let val_type = asm.ctx.get_opnd_type(StackOpnd(0));
+    let val_opnd = asm.stack_pop(1);
+
+    incr_counter!(branch_insn_count);
+
+    if let Some(result) = val_type.known_truthy() {
+        let target = if result == branch_if { jump_block } else { next_block };
+        gen_direct_jump(jit, &asm.ctx.clone(), target, asm);
+        incr_counter!(branch_known_count);
+    } else {
+        asm.test(val_opnd, Opnd::Imm(!Qnil.as_i64()));
+
+        let ctx = asm.ctx;
+        let gen_fn = if branch_if {
+            BranchGenFn::BranchIf(Cell::new(BranchShape::Default))
+        } else {
+            BranchGenFn::BranchUnless(Cell::new(BranchShape::Default))
+        };
+        let (target0, target1) = if branch_if {
+            (jump_block, next_block)
+        } else {
+            (jump_block, next_block)
+        };
+        jit.gen_branch(
+            asm,
+            target0,
+            &ctx,
+            Some(target1),
+            Some(&ctx),
+            gen_fn,
+        );
+    }
+
+    Some(EndBlock)
+}
+
 fn gen_branchnil(
     jit: &mut JITState,
     asm: &mut Assembler,
@@ -9624,12 +9686,20 @@ fn gen_opt_respond_to(
     jit: &mut JITState,
     asm: &mut Assembler,
 ) -> Option<CodegenStatus> {
+    gen_opt_respond_to_with_cd_arg(jit, asm, 0)
+}
+
+fn gen_opt_respond_to_with_cd_arg(
+    jit: &mut JITState,
+    asm: &mut Assembler,
+    cd_arg: isize,
+) -> Option<CodegenStatus> {
     // opt_respond_to's runtime stack and call data are identical to a normal
     // `recv.respond_to?(mid[, include_all])` send (cd->ci has mid=respond_to?),
     // so we reuse the send machinery. Crucially this keeps the rest of the
     // method JIT-compiled: without a handler YJIT side-exits here, abandoning
     // compilation of everything after the respond_to? call.
-    let cd = jit.get_arg(0).as_ptr();
+    let cd = jit.get_arg(cd_arg).as_ptr();
     if let Some(status) = perf_call! { gen_send_general(jit, asm, cd, None) } {
         return Some(status);
     }
@@ -9644,6 +9714,219 @@ fn gen_opt_respond_to(
             vec![EC, CFP, (cd as usize).into()],
         )
     })
+}
+
+fn gen_opt_respond_to_symbol(
+    jit: &mut JITState,
+    asm: &mut Assembler,
+) -> Option<CodegenStatus> {
+    if !jit.at_compile_target() {
+        return None;
+    }
+
+    let comptime_recv = jit.peek_at_stack(&asm.ctx, 0);
+    gen_opt_respond_to_symbol_direct(jit, asm, comptime_recv, 0, 3, false)
+}
+
+fn gen_opt_respond_to_symbol_drop(
+    jit: &mut JITState,
+    asm: &mut Assembler,
+) -> Option<CodegenStatus> {
+    if !jit.at_compile_target() {
+        return None;
+    }
+
+    let comptime_recv = jit.peek_at_stack(&asm.ctx, 0);
+    gen_opt_respond_to_symbol_direct(jit, asm, comptime_recv, 0, 3, true)
+}
+
+fn gen_opt_respond_to_symbol_drop_local(
+    jit: &mut JITState,
+    asm: &mut Assembler,
+) -> Option<CodegenStatus> {
+    if !jit.at_compile_target() {
+        return jit.defer_compilation(asm);
+    }
+
+    let idx = jit.get_arg(0).as_u32();
+    let level = jit.get_arg(1).as_u32();
+    let comptime_recv = if level == 0 {
+        let local_idx = ep_offset_to_local_idx(jit.get_iseq(), idx);
+        jit.peek_at_local(local_idx as i32)
+    } else {
+        let ep = unsafe { get_cfp_ep_level(jit.get_cfp(), level) };
+        unsafe { *ep.offset(-(idx as isize)) }
+    };
+
+    gen_getlocal_generic(jit, asm, idx, level)?;
+    gen_opt_respond_to_symbol_direct(jit, asm, comptime_recv, 2, 5, true)
+}
+
+fn gen_opt_respond_to_symbol_branchif(
+    jit: &mut JITState,
+    asm: &mut Assembler,
+) -> Option<CodegenStatus> {
+    if !jit.at_compile_target() {
+        return None;
+    }
+
+    let comptime_recv = jit.peek_at_stack(&asm.ctx, 0);
+    gen_opt_respond_to_symbol_direct(jit, asm, comptime_recv, 0, 3, false)?;
+    let jump_offset = jit.get_arg(5).as_i32();
+    gen_branch_on_stack_value(jit, asm, jump_offset, true)
+}
+
+fn gen_opt_respond_to_symbol_branchunless(
+    jit: &mut JITState,
+    asm: &mut Assembler,
+) -> Option<CodegenStatus> {
+    if !jit.at_compile_target() {
+        return None;
+    }
+
+    let comptime_recv = jit.peek_at_stack(&asm.ctx, 0);
+    gen_opt_respond_to_symbol_direct(jit, asm, comptime_recv, 0, 3, false)?;
+    let jump_offset = jit.get_arg(5).as_i32();
+    gen_branch_on_stack_value(jit, asm, jump_offset, false)
+}
+
+fn gen_opt_respond_to_symbol_branchif_local(
+    jit: &mut JITState,
+    asm: &mut Assembler,
+) -> Option<CodegenStatus> {
+    if !jit.at_compile_target() {
+        return None;
+    }
+
+    let idx = jit.get_arg(0).as_u32();
+    let level = jit.get_arg(1).as_u32();
+    let comptime_recv = if level == 0 {
+        let local_idx = ep_offset_to_local_idx(jit.get_iseq(), idx);
+        jit.peek_at_local(local_idx as i32)
+    } else {
+        let ep = unsafe { get_cfp_ep_level(jit.get_cfp(), level) };
+        unsafe { *ep.offset(-(idx as isize)) }
+    };
+
+    gen_getlocal_generic(jit, asm, idx, level)?;
+    gen_opt_respond_to_symbol_direct(jit, asm, comptime_recv, 2, 5, false)?;
+    let jump_offset = jit.get_arg(7).as_i32();
+    gen_branch_on_stack_value(jit, asm, jump_offset, true)
+}
+
+fn gen_opt_respond_to_symbol_branchunless_local(
+    jit: &mut JITState,
+    asm: &mut Assembler,
+) -> Option<CodegenStatus> {
+    if !jit.at_compile_target() {
+        return None;
+    }
+
+    let idx = jit.get_arg(0).as_u32();
+    let level = jit.get_arg(1).as_u32();
+    let comptime_recv = if level == 0 {
+        let local_idx = ep_offset_to_local_idx(jit.get_iseq(), idx);
+        jit.peek_at_local(local_idx as i32)
+    } else {
+        let ep = unsafe { get_cfp_ep_level(jit.get_cfp(), level) };
+        unsafe { *ep.offset(-(idx as isize)) }
+    };
+
+    gen_getlocal_generic(jit, asm, idx, level)?;
+    gen_opt_respond_to_symbol_direct(jit, asm, comptime_recv, 2, 5, false)?;
+    let jump_offset = jit.get_arg(7).as_i32();
+    gen_branch_on_stack_value(jit, asm, jump_offset, false)
+}
+
+fn gen_opt_nil_p_and_not_respond_to_symbol_local(
+    jit: &mut JITState,
+    asm: &mut Assembler,
+) -> Option<CodegenStatus> {
+    let _ = (jit, asm);
+    None
+}
+
+fn gen_opt_nil_p_and_not_respond_to_symbol_branchunless_local(
+    jit: &mut JITState,
+    asm: &mut Assembler,
+) -> Option<CodegenStatus> {
+    let _ = (jit, asm);
+    None
+}
+
+fn gen_opt_respond_to_symbol_direct(
+    jit: &mut JITState,
+    asm: &mut Assembler,
+    comptime_recv: VALUE,
+    cd_arg: isize,
+    id_arg: isize,
+    drop_result: bool,
+) -> Option<CodegenStatus> {
+    if !jit.at_compile_target() {
+        return jit.defer_compilation(asm);
+    }
+
+    let recv = asm.stack_opnd(0);
+    let recv_opnd: YARVOpnd = recv.into();
+    let recv_class = comptime_recv.class_of();
+    let cd = jit.get_arg(cd_arg).as_ptr();
+    let ci = unsafe { get_call_data_ci(cd) };
+    let respond_to_id = unsafe { vm_ci_mid(ci) };
+    let id = jit.get_arg(id_arg).as_usize() as ID;
+
+    perf_call!("opt_respond_to_symbol: ", jit_guard_known_klass(
+        jit,
+        asm,
+        recv,
+        recv_opnd,
+        comptime_recv,
+        SEND_MAX_DEPTH,
+        Counter::guard_send_klass_megamorphic,
+    ));
+
+    if !assume_method_basic_definition(jit, asm, recv_class, respond_to_id) {
+        return None;
+    }
+
+    let target_cme = unsafe { rb_callable_method_entry_or_negative(recv_class, id) };
+    assert!(!target_cme.is_null());
+
+    let cme_def_type = unsafe { get_cme_def_type(target_cme) };
+    if cme_def_type == VM_METHOD_TYPE_REFINED {
+        return None;
+    }
+
+    let visibility = if cme_def_type == VM_METHOD_TYPE_UNDEF {
+        METHOD_VISI_UNDEF
+    } else {
+        unsafe { METHOD_ENTRY_VISI(target_cme) }
+    };
+
+    let result = match visibility {
+        METHOD_VISI_UNDEF => {
+            if !assume_method_basic_definition(jit, asm, recv_class, ID!(respond_to_missing)) {
+                return None;
+            }
+            Qfalse
+        }
+        METHOD_VISI_PUBLIC => {
+            if cme_def_type == VM_METHOD_TYPE_NOTIMPLEMENTED {
+                Qfalse
+            } else {
+                Qtrue
+            }
+        }
+        _ => Qfalse,
+    };
+
+    jit.assume_method_lookup_stable(asm, target_cme);
+
+    asm.stack_pop(1);
+    if !drop_result {
+        jit_putobject(asm, result);
+    }
+
+    Some(KeepCompiling)
 }
 
 fn gen_send(
@@ -10845,6 +11128,15 @@ fn get_gen_fn(opcode: VALUE) -> Option<InsnGenFn> {
         YARVINSN_getblockparam => Some(gen_getblockparam),
         YARVINSN_opt_send_without_block => Some(gen_opt_send_without_block),
         YARVINSN_opt_respond_to => Some(gen_opt_respond_to),
+        YARVINSN_opt_respond_to_symbol => Some(gen_opt_respond_to_symbol),
+        YARVINSN_opt_respond_to_symbol_drop => Some(gen_opt_respond_to_symbol_drop),
+        YARVINSN_opt_respond_to_symbol_drop_local => Some(gen_opt_respond_to_symbol_drop_local),
+        YARVINSN_opt_respond_to_symbol_branchif => Some(gen_opt_respond_to_symbol_branchif),
+        YARVINSN_opt_respond_to_symbol_branchunless => Some(gen_opt_respond_to_symbol_branchunless),
+        YARVINSN_opt_respond_to_symbol_branchif_local => Some(gen_opt_respond_to_symbol_branchif_local),
+        YARVINSN_opt_respond_to_symbol_branchunless_local => Some(gen_opt_respond_to_symbol_branchunless_local),
+        YARVINSN_opt_nil_p_and_not_respond_to_symbol_local => Some(gen_opt_nil_p_and_not_respond_to_symbol_local),
+        YARVINSN_opt_nil_p_and_not_respond_to_symbol_branchunless_local => Some(gen_opt_nil_p_and_not_respond_to_symbol_branchunless_local),
         YARVINSN_send => Some(gen_send),
         YARVINSN_sendforward => Some(gen_sendforward),
         YARVINSN_invokeblock => Some(gen_invokeblock),

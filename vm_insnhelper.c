@@ -2282,8 +2282,13 @@ static const struct rb_callable_method_entry_struct *
 vm_search_method(struct rb_control_frame_struct *reg_cfp, struct rb_call_data *cd, VALUE recv)
 {
     VALUE klass = CLASS_OF(recv);
-    VM_ASSERT(klass != Qfalse);
-    VM_ASSERT(RBASIC_CLASS(klass) == 0 || rb_obj_is_kind_of(klass, rb_cClass));
+    if (recv == Qnil) {
+        klass = rb_cNilClass;
+    }
+    else {
+        VM_ASSERT(klass != Qfalse);
+        VM_ASSERT(RBASIC_CLASS(klass) == 0 || rb_obj_is_kind_of(klass, rb_cClass));
+    }
 
     const struct rb_callcache *cc = vm_search_method_fastpath(reg_cfp, cd, klass);
     return vm_cc_cme(cc);
@@ -6244,9 +6249,15 @@ vm_opt_respond_to(
     VALUE include_all
 )
 {
-    VALUE klass = CLASS_OF(recv);
-    VM_ASSERT(klass != Qfalse);
-    VM_ASSERT(RBASIC_CLASS(klass) == 0 || rb_obj_is_kind_of(klass, rb_cClass));
+    VALUE klass;
+    if (recv == Qnil) {
+        klass = rb_cNilClass;
+    }
+    else {
+        klass = CLASS_OF(recv);
+        VM_ASSERT(klass != Qfalse);
+        VM_ASSERT(RBASIC_CLASS(klass) == 0 || rb_obj_is_kind_of(klass, rb_cClass));
+    }
 
     // Only specialize when respond_to? itself is the basic Kernel implementation.
     // vm_search_method uses cd->cc, which is properly invalidated, so this stays
@@ -6293,6 +6304,401 @@ vm_opt_respond_to(
         }
         return Qundef;
     }
+}
+
+static VALUE
+vm_opt_respond_to_symbol_fallback(VALUE recv, ID id)
+{
+    VALUE mid = ID2SYM(id);
+    return rb_funcallv(recv, idRespond_to, 1, &mid);
+}
+
+static inline rb_serial_t
+vm_opt_respond_to_symbol_cache_state(int result)
+{
+    VM_ASSERT((ruby_vm_global_method_state & 1) == 0);
+    return ruby_vm_global_method_state | (rb_serial_t)result;
+}
+
+static inline int
+vm_opt_respond_to_symbol_cache_result(rb_serial_t state)
+{
+    return (int)(state & 1);
+}
+
+static inline rb_serial_t
+vm_opt_respond_to_symbol_cache_method_state(rb_serial_t state)
+{
+    return state & ~(rb_serial_t)1;
+}
+
+ALWAYS_INLINE(static int vm_opt_respond_to_symbol_cached_result(
+    struct rb_control_frame_struct *reg_cfp,
+    struct rb_call_data *cd,
+    struct rb_call_data *target_cd,
+    struct rb_call_data *rtm_cd,
+    VALUE recv,
+    ID id,
+    VALUE klass,
+    ISE cache
+));
+ALWAYS_INLINE(static int
+vm_opt_respond_to_symbol_cached_result(
+    struct rb_control_frame_struct *reg_cfp,
+    struct rb_call_data *cd,
+    struct rb_call_data *target_cd,
+    struct rb_call_data *rtm_cd,
+    VALUE recv,
+    ID id,
+    VALUE klass,
+    ISE cache
+))
+{
+    if (cache && LIKELY(!rb_multi_ractor_p())) {
+        struct iseq_inline_respond_to_cache_entry *entry = &cache->respond_to_cache;
+
+        if (LIKELY(entry->klass == klass &&
+                   vm_opt_respond_to_symbol_cache_method_state(entry->method_state_and_result) == ruby_vm_global_method_state)) {
+            return vm_opt_respond_to_symbol_cache_result(entry->method_state_and_result);
+        }
+    }
+
+    if (klass == rb_cNilClass &&
+        LIKELY(BASIC_OP_UNREDEFINED_P(BOP_RESPOND_TO, NIL_REDEFINED_OP_FLAG))) {
+        const struct rb_callcache *target_cc = target_cd->cc;
+        if (LIKELY(vm_cc_class_check(target_cc, klass))) {
+            const rb_callable_method_entry_t *cme = vm_cc_cme(target_cc);
+            if (LIKELY(UNDEFINED_METHOD_ENTRY_P(cme))) {
+                return 0;
+            }
+            else if (LIKELY(!METHOD_ENTRY_INVALIDATED(cme))) {
+                switch (cme->def->type) {
+                  case VM_METHOD_TYPE_NOTIMPLEMENTED:
+                  case VM_METHOD_TYPE_REFINED:
+                    break;
+                  default:
+                    return METHOD_ENTRY_VISI(cme) == METHOD_VISI_PUBLIC;
+                }
+            }
+        }
+    }
+
+    const struct rb_callcache *respond_to_cc = cd->cc;
+    if (LIKELY(vm_cc_class_check(respond_to_cc, klass))) {
+        const rb_callable_method_entry_t *respond_to_cme = vm_cc_cme(respond_to_cc);
+        if (LIKELY(!METHOD_ENTRY_INVALIDATED(respond_to_cme) &&
+                   METHOD_ENTRY_BASIC(respond_to_cme))) {
+            const struct rb_callcache *target_cc = target_cd->cc;
+            if (LIKELY(vm_cc_class_check(target_cc, klass))) {
+                const rb_callable_method_entry_t *cme = vm_cc_cme(target_cc);
+                if (LIKELY(UNDEFINED_METHOD_ENTRY_P(cme))) {
+                    const struct rb_callcache *rtm_cc = rtm_cd->cc;
+                    const rb_callable_method_entry_t *rtm_cme = vm_cc_cme(rtm_cc);
+                    if (LIKELY(vm_cc_class_check(rtm_cc, klass) &&
+                               rtm_cme &&
+                               !METHOD_ENTRY_INVALIDATED(rtm_cme) &&
+                               METHOD_ENTRY_BASIC(rtm_cme))) {
+                        if (cache && LIKELY(!rb_multi_ractor_p())) {
+                            struct iseq_inline_respond_to_cache_entry *entry = &cache->respond_to_cache;
+                            entry->method_state_and_result = vm_opt_respond_to_symbol_cache_state(0);
+                            entry->klass = klass;
+                        }
+                        return 0;
+                    }
+                }
+                else if (LIKELY(!METHOD_ENTRY_INVALIDATED(cme))) {
+                    switch (cme->def->type) {
+                      case VM_METHOD_TYPE_NOTIMPLEMENTED:
+                      case VM_METHOD_TYPE_REFINED:
+                        break;
+                      default:
+                        int result = METHOD_ENTRY_VISI(cme) == METHOD_VISI_PUBLIC;
+                        if (cache && LIKELY(!rb_multi_ractor_p())) {
+                            struct iseq_inline_respond_to_cache_entry *entry = &cache->respond_to_cache;
+                            entry->method_state_and_result = vm_opt_respond_to_symbol_cache_state(result);
+                            entry->klass = klass;
+                        }
+                        return result;
+                    }
+                }
+            }
+        }
+    }
+
+    if (cache && LIKELY(!rb_multi_ractor_p())) {
+        const rb_callable_method_entry_t *respond_to_cme = vm_search_method(reg_cfp, cd, recv);
+        if (LIKELY(respond_to_cme && METHOD_ENTRY_BASIC(respond_to_cme))) {
+            const struct rb_callcache *target_cc = vm_search_method_fastpath(reg_cfp, target_cd, klass);
+            const rb_callable_method_entry_t *cme = vm_cc_cme(target_cc);
+
+            if (cme && !UNDEFINED_METHOD_ENTRY_P(cme)) {
+                if (LIKELY(cme->def->type != VM_METHOD_TYPE_NOTIMPLEMENTED &&
+                           cme->def->type != VM_METHOD_TYPE_REFINED)) {
+                    int result = METHOD_ENTRY_VISI(cme) == METHOD_VISI_PUBLIC;
+                    struct iseq_inline_respond_to_cache_entry *entry = &cache->respond_to_cache;
+                    entry->method_state_and_result = vm_opt_respond_to_symbol_cache_state(result);
+                    entry->klass = klass;
+                    return result;
+                }
+            }
+            else {
+                const struct rb_callcache *rtm_cc = vm_search_method_fastpath(reg_cfp, rtm_cd, klass);
+                const rb_callable_method_entry_t *rtm_cme = vm_cc_cme(rtm_cc);
+                if (!rtm_cme || METHOD_ENTRY_BASIC(rtm_cme)) {
+                    struct iseq_inline_respond_to_cache_entry *entry = &cache->respond_to_cache;
+                    entry->method_state_and_result = vm_opt_respond_to_symbol_cache_state(0);
+                    entry->klass = klass;
+                    return 0;
+                }
+            }
+        }
+    }
+
+    return -1;
+}
+
+ALWAYS_INLINE(static VALUE vm_opt_respond_to_symbol(
+    struct rb_control_frame_struct *reg_cfp,
+    struct rb_call_data *cd,
+    struct rb_call_data *target_cd,
+    struct rb_call_data *rtm_cd,
+    VALUE recv,
+    ID id
+));
+ALWAYS_INLINE(static VALUE
+vm_opt_respond_to_symbol(
+    struct rb_control_frame_struct *reg_cfp,
+    struct rb_call_data *cd,
+    struct rb_call_data *target_cd,
+    struct rb_call_data *rtm_cd,
+    VALUE recv,
+    ID id
+))
+{
+    VALUE klass = CLASS_OF(recv);
+    VM_ASSERT(klass != Qfalse);
+    VM_ASSERT(RBASIC_CLASS(klass) == 0 || rb_obj_is_kind_of(klass, rb_cClass));
+
+    const struct rb_callcache *respond_to_cc = cd->cc;
+    if (LIKELY(vm_cc_class_check(respond_to_cc, klass))) {
+        const rb_callable_method_entry_t *respond_to_cme = vm_cc_cme(respond_to_cc);
+        if (LIKELY(!METHOD_ENTRY_INVALIDATED(respond_to_cme) &&
+                   METHOD_ENTRY_BASIC(respond_to_cme))) {
+            const struct rb_callcache *target_cc = target_cd->cc;
+            if (LIKELY(vm_cc_class_check(target_cc, klass))) {
+                const rb_callable_method_entry_t *cme = vm_cc_cme(target_cc);
+                if (LIKELY(UNDEFINED_METHOD_ENTRY_P(cme))) {
+                    const struct rb_callcache *rtm_cc = rtm_cd->cc;
+                    const rb_callable_method_entry_t *rtm_cme = vm_cc_cme(rtm_cc);
+                    if (LIKELY(vm_cc_class_check(rtm_cc, klass) &&
+                               rtm_cme &&
+                               !METHOD_ENTRY_INVALIDATED(rtm_cme) &&
+                               METHOD_ENTRY_BASIC(rtm_cme))) {
+                        return Qfalse;
+                    }
+                }
+                else if (LIKELY(!METHOD_ENTRY_INVALIDATED(cme))) {
+                    switch (cme->def->type) {
+                      case VM_METHOD_TYPE_NOTIMPLEMENTED:
+                      case VM_METHOD_TYPE_REFINED:
+                        break;
+                      default:
+                        return METHOD_ENTRY_VISI(cme) == METHOD_VISI_PUBLIC ? Qtrue : Qfalse;
+                    }
+                }
+            }
+        }
+    }
+
+    const rb_callable_method_entry_t *respond_to_cme = vm_search_method(reg_cfp, cd, recv);
+    if (!respond_to_cme || !METHOD_ENTRY_BASIC(respond_to_cme)) {
+        return vm_opt_respond_to_symbol_fallback(recv, id);
+    }
+
+    const struct rb_callcache *target_cc = vm_search_method_fastpath(reg_cfp, target_cd, klass);
+    const rb_callable_method_entry_t *cme = vm_cc_cme(target_cc);
+
+    if (cme && !UNDEFINED_METHOD_ENTRY_P(cme)) {
+        if (cme->def->type == VM_METHOD_TYPE_NOTIMPLEMENTED) {
+            return vm_opt_respond_to_symbol_fallback(recv, id);
+        }
+        if (UNLIKELY(cme->def->type == VM_METHOD_TYPE_REFINED)) {
+            cme = rb_callable_method_entry_with_refinements(klass, id, NULL);
+            if (!cme || UNDEFINED_METHOD_ENTRY_P(cme)) {
+                const rb_callable_method_entry_t *rtm_cme = rb_callable_method_entry(klass, idRespond_to_missing);
+                if (!rtm_cme || METHOD_ENTRY_BASIC(rtm_cme)) {
+                    return Qfalse;
+                }
+
+                return vm_opt_respond_to_symbol_fallback(recv, id);
+            }
+            if (cme->def->type == VM_METHOD_TYPE_NOTIMPLEMENTED) {
+                return vm_opt_respond_to_symbol_fallback(recv, id);
+            }
+        }
+
+        return METHOD_ENTRY_VISI(cme) == METHOD_VISI_PUBLIC ? Qtrue : Qfalse;
+    }
+
+    const struct rb_callcache *rtm_cc = vm_search_method_fastpath(reg_cfp, rtm_cd, klass);
+    const rb_callable_method_entry_t *rtm_cme = vm_cc_cme(rtm_cc);
+    if (!rtm_cme || METHOD_ENTRY_BASIC(rtm_cme)) {
+        return Qfalse;
+    }
+
+    return vm_opt_respond_to_symbol_fallback(recv, id);
+}
+
+ALWAYS_INLINE(static bool vm_opt_respond_to_symbol_p(
+    struct rb_control_frame_struct *reg_cfp,
+    struct rb_call_data *cd,
+    struct rb_call_data *target_cd,
+    struct rb_call_data *rtm_cd,
+    VALUE recv,
+    ID id
+));
+ALWAYS_INLINE(static bool
+vm_opt_respond_to_symbol_p(
+    struct rb_control_frame_struct *reg_cfp,
+    struct rb_call_data *cd,
+    struct rb_call_data *target_cd,
+    struct rb_call_data *rtm_cd,
+    VALUE recv,
+    ID id
+))
+{
+    VALUE klass;
+
+    if (recv == Qnil) {
+        klass = rb_cNilClass;
+    }
+    else {
+        klass = CLASS_OF(recv);
+        VM_ASSERT(klass != Qfalse);
+        VM_ASSERT(RBASIC_CLASS(klass) == 0 || rb_obj_is_kind_of(klass, rb_cClass));
+    }
+
+    const struct rb_callcache *respond_to_cc = cd->cc;
+    if (LIKELY(vm_cc_class_check(respond_to_cc, klass))) {
+        const rb_callable_method_entry_t *respond_to_cme = vm_cc_cme(respond_to_cc);
+        if (LIKELY(!METHOD_ENTRY_INVALIDATED(respond_to_cme) &&
+                   METHOD_ENTRY_BASIC(respond_to_cme))) {
+            const struct rb_callcache *target_cc = target_cd->cc;
+            if (LIKELY(vm_cc_class_check(target_cc, klass))) {
+                const rb_callable_method_entry_t *cme = vm_cc_cme(target_cc);
+                if (LIKELY(UNDEFINED_METHOD_ENTRY_P(cme))) {
+                    const struct rb_callcache *rtm_cc = rtm_cd->cc;
+                    const rb_callable_method_entry_t *rtm_cme = vm_cc_cme(rtm_cc);
+                    if (LIKELY(vm_cc_class_check(rtm_cc, klass) &&
+                               rtm_cme &&
+                               !METHOD_ENTRY_INVALIDATED(rtm_cme) &&
+                               METHOD_ENTRY_BASIC(rtm_cme))) {
+                        return false;
+                    }
+                }
+                else if (LIKELY(!METHOD_ENTRY_INVALIDATED(cme))) {
+                    switch (cme->def->type) {
+                      case VM_METHOD_TYPE_NOTIMPLEMENTED:
+                      case VM_METHOD_TYPE_REFINED:
+                        break;
+                      default:
+                        return METHOD_ENTRY_VISI(cme) == METHOD_VISI_PUBLIC;
+                    }
+                }
+            }
+        }
+    }
+
+    return RTEST(vm_opt_respond_to_symbol(reg_cfp, cd, target_cd, rtm_cd, recv, id));
+}
+
+ALWAYS_INLINE(static void vm_opt_respond_to_symbol_drop(
+    struct rb_control_frame_struct *reg_cfp,
+    struct rb_call_data *cd,
+    struct rb_call_data *target_cd,
+    struct rb_call_data *rtm_cd,
+    VALUE recv,
+    ID id
+));
+ALWAYS_INLINE(static void
+vm_opt_respond_to_symbol_drop(
+    struct rb_control_frame_struct *reg_cfp,
+    struct rb_call_data *cd,
+    struct rb_call_data *target_cd,
+    struct rb_call_data *rtm_cd,
+    VALUE recv,
+    ID id
+))
+{
+    VALUE klass = CLASS_OF(recv);
+    VM_ASSERT(klass != Qfalse);
+    VM_ASSERT(RBASIC_CLASS(klass) == 0 || rb_obj_is_kind_of(klass, rb_cClass));
+
+    const struct rb_callcache *respond_to_cc = cd->cc;
+    if (LIKELY(vm_cc_class_check(respond_to_cc, klass))) {
+        const rb_callable_method_entry_t *respond_to_cme = vm_cc_cme(respond_to_cc);
+        if (LIKELY(!METHOD_ENTRY_INVALIDATED(respond_to_cme) &&
+                   METHOD_ENTRY_BASIC(respond_to_cme))) {
+            const struct rb_callcache *target_cc = target_cd->cc;
+            const rb_callable_method_entry_t *cme = vm_cc_cme(target_cc);
+            if (LIKELY(cme && !METHOD_ENTRY_INVALIDATED(cme))) {
+                if (LIKELY(!rb_multi_ractor_p()) || LIKELY(vm_cc_class_check(target_cc, klass))) {
+                    const struct rb_callcache *rtm_cc = rtm_cd->cc;
+                    const rb_callable_method_entry_t *rtm_cme = vm_cc_cme(rtm_cc);
+                    if (LIKELY(rtm_cme && !METHOD_ENTRY_INVALIDATED(rtm_cme) &&
+                               METHOD_ENTRY_BASIC(rtm_cme)) &&
+                        (LIKELY(!rb_multi_ractor_p()) || LIKELY(vm_cc_class_check(rtm_cc, klass)))) {
+                        VM_ASSERT(vm_cc_class_check(target_cc, klass));
+                        VM_ASSERT(vm_cc_class_check(rtm_cc, klass));
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    const rb_callable_method_entry_t *respond_to_cme = vm_search_method(reg_cfp, cd, recv);
+    if (!respond_to_cme || !METHOD_ENTRY_BASIC(respond_to_cme)) {
+        vm_opt_respond_to_symbol_fallback(recv, id);
+        return;
+    }
+
+    const struct rb_callcache *target_cc = vm_search_method_fastpath(reg_cfp, target_cd, klass);
+    const rb_callable_method_entry_t *cme = vm_cc_cme(target_cc);
+    if (cme && !UNDEFINED_METHOD_ENTRY_P(cme)) {
+        const struct rb_callcache *rtm_cc = vm_search_method_fastpath(reg_cfp, rtm_cd, klass);
+        const rb_callable_method_entry_t *rtm_cme = vm_cc_cme(rtm_cc);
+        if (METHOD_ENTRY_VISI(cme) == METHOD_VISI_PUBLIC ||
+            !rtm_cme ||
+            METHOD_ENTRY_BASIC(rtm_cme)) {
+            return;
+        }
+
+        vm_opt_respond_to_symbol_fallback(recv, id);
+        return;
+    }
+
+    cme = rb_callable_method_entry_with_refinements(klass, id, NULL);
+    if (cme && !UNDEFINED_METHOD_ENTRY_P(cme)) {
+        const struct rb_callcache *rtm_cc = vm_search_method_fastpath(reg_cfp, rtm_cd, klass);
+        const rb_callable_method_entry_t *rtm_cme = vm_cc_cme(rtm_cc);
+        if (METHOD_ENTRY_VISI(cme) == METHOD_VISI_PUBLIC ||
+            !rtm_cme ||
+            METHOD_ENTRY_BASIC(rtm_cme)) {
+            return;
+        }
+
+        vm_opt_respond_to_symbol_fallback(recv, id);
+        return;
+    }
+
+    const struct rb_callcache *rtm_cc = vm_search_method_fastpath(reg_cfp, rtm_cd, klass);
+    const rb_callable_method_entry_t *rtm_cme = vm_cc_cme(rtm_cc);
+    if (!rtm_cme || METHOD_ENTRY_BASIC(rtm_cme)) {
+        return;
+    }
+
+    vm_opt_respond_to_symbol_fallback(recv, id);
 }
 
 static VALUE
