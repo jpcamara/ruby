@@ -987,6 +987,33 @@ opt_hash_freeze
     }
 }
 
+/* Specialized respond_to?(sym[, include_all]) — computes the answer inline
+ * instead of dispatching the Kernel#respond_to? C method. No inline cache:
+ * it leans on the per-class cc-table that the method lookup already uses. */
+DEFINE_INSN
+opt_respond_to
+(CALL_DATA cd)
+(...)
+(VALUE val)
+// attr rb_snum_t sp_inc = sp_inc_of_sendish(cd->ci);
+// attr rb_snum_t comptime_sp_inc = sp_inc_of_sendish(ci);
+{
+    int argc = vm_ci_argc(cd->ci);
+    if (argc == 2) {
+        val = vm_opt_respond_to(GET_CFP(), cd, TOPN(2), TOPN(1), TOPN(0));
+    }
+    else if (argc == 1) {
+        val = vm_opt_respond_to(GET_CFP(), cd, TOPN(1), TOPN(0), Qfalse);
+    }
+    else {
+        rb_raise(rb_eArgError, "wrong number of arguments (given %d, expected 1 or 2)", argc);
+    }
+
+    if (UNDEF_P(val)) {
+        CALL_SIMPLE_METHOD();
+    }
+}
+
 DEFINE_INSN
 opt_str_freeze
 (VALUE str, CALL_DATA cd)

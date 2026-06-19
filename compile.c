@@ -3598,6 +3598,24 @@ iseq_peephole_optimize(rb_iseq_t *iseq, LINK_ELEMENT *list, const int do_tailcal
     }
 
     /*
+     *  send <calldata!mid:respond_to?, argc:1/2, ARGS_SIMPLE>
+     * =>
+     *  opt_respond_to <calldata!mid:respond_to?, ...>
+     */
+    if (IS_INSN_ID(iobj, send)) {
+        const struct rb_callinfo *ci = (struct rb_callinfo *)OPERAND_AT(iobj, 0);
+        const rb_iseq_t *blockiseq = (rb_iseq_t *)OPERAND_AT(iobj, 1);
+        int argc = vm_ci_argc(ci);
+        if (vm_ci_simple(ci) && blockiseq == NULL && vm_ci_mid(ci) == idRespond_to &&
+            (argc == 1 || argc == 2)) {
+            iobj->insn_id = BIN(opt_respond_to);
+            iobj->operand_size = 1;
+            iobj->operands = compile_data_calloc2_type(iseq, VALUE, iobj->operand_size);
+            iobj->operands[0] = (VALUE)ci;
+        }
+    }
+
+    /*
      * newhash 0
      * send     <calldata!mid:freeze, argc:0, ARGS_SIMPLE>, nil
      * =>

@@ -6233,6 +6233,49 @@ vm_opt_ary_freeze(VALUE ary, int bop, ID id)
     }
 }
 
+/* No-cache respond_to? specialization. Returns Qtrue/Qfalse, or Qundef to fall
+ * back to the real Kernel#respond_to? (when respond_to? is overridden, the
+ * symbol can't be interned, the method is not-implemented, or it's not found
+ * and we must consult respond_to_missing?). Relies on the per-class cc-table
+ * that the underlying lookups already use; no per-call-site cache. */
+static VALUE
+vm_opt_respond_to(struct rb_control_frame_struct *reg_cfp, struct rb_call_data *cd,
+                  VALUE recv, VALUE mid, VALUE include_all)
+{
+    VALUE klass = CLASS_OF(recv);
+    VM_ASSERT(klass != Qfalse);
+
+    // respond_to? itself must be the basic (unoverridden) implementation.
+    const rb_callable_method_entry_t *respond_to_cme = vm_search_method(reg_cfp, cd, recv);
+    if (!respond_to_cme || !METHOD_ENTRY_BASIC(respond_to_cme)) {
+        return Qundef;
+    }
+
+    ID id = rb_check_id(&mid);
+    if (!id) {
+        return Qundef; // symbol not interned -> definitely not defined; let Ruby handle it
+    }
+
+    VALUE defined_class;
+    const rb_callable_method_entry_t *cme = rb_callable_method_entry_with_refinements(klass, id, &defined_class);
+    if (cme && !UNDEFINED_METHOD_ENTRY_P(cme)) {
+        if (cme->def->type == VM_METHOD_TYPE_NOTIMPLEMENTED) {
+            return Qundef;
+        }
+        rb_method_visibility_t visi = METHOD_ENTRY_VISI(cme);
+        return (RTEST(include_all) || visi == METHOD_VISI_PUBLIC) ? Qtrue : Qfalse;
+    }
+
+    // Not found. If respond_to_missing? is the default (basic) implementation it
+    // always returns false, so we can answer inline. Only fall back when it's
+    // been overridden and must actually be called.
+    const rb_callable_method_entry_t *rtm = rb_callable_method_entry(klass, idRespond_to_missing);
+    if (!rtm || METHOD_ENTRY_BASIC(rtm)) {
+        return Qfalse;
+    }
+    return Qundef;
+}
+
 static VALUE
 vm_opt_hash_freeze(VALUE hash, int bop, ID id)
 {
