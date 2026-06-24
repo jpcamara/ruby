@@ -9620,6 +9620,32 @@ fn gen_opt_send_without_block(
     })
 }
 
+fn gen_opt_respond_to(
+    jit: &mut JITState,
+    asm: &mut Assembler,
+) -> Option<CodegenStatus> {
+    // opt_respond_to's runtime stack and call data are identical to a normal
+    // `recv.respond_to?(mid[, include_all])` send (cd->ci has mid=respond_to?),
+    // so we reuse the send machinery. Crucially this keeps the rest of the
+    // method JIT-compiled: without a handler YJIT side-exits here, abandoning
+    // compilation of everything after the respond_to? call.
+    let cd = jit.get_arg(0).as_ptr();
+    if let Some(status) = perf_call! { gen_send_general(jit, asm, cd, None) } {
+        return Some(status);
+    }
+
+    // Otherwise, fallback to dynamic dispatch (sends respond_to? via the cd).
+    gen_send_dynamic(jit, asm, cd, unsafe { rb_yjit_sendish_sp_pops((*cd).ci) }, |asm| {
+        extern "C" {
+            fn rb_vm_opt_send_without_block(ec: EcPtr, cfp: CfpPtr, cd: VALUE) -> VALUE;
+        }
+        asm.ccall(
+            rb_vm_opt_send_without_block as *const u8,
+            vec![EC, CFP, (cd as usize).into()],
+        )
+    })
+}
+
 fn gen_send(
     jit: &mut JITState,
     asm: &mut Assembler,
@@ -10818,6 +10844,7 @@ fn get_gen_fn(opcode: VALUE) -> Option<InsnGenFn> {
         YARVINSN_getblockparamproxy => Some(gen_getblockparamproxy),
         YARVINSN_getblockparam => Some(gen_getblockparam),
         YARVINSN_opt_send_without_block => Some(gen_opt_send_without_block),
+        YARVINSN_opt_respond_to => Some(gen_opt_respond_to),
         YARVINSN_send => Some(gen_send),
         YARVINSN_sendforward => Some(gen_sendforward),
         YARVINSN_invokeblock => Some(gen_invokeblock),

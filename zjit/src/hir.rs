@@ -8618,6 +8618,10 @@ fn add_iseq_to_hir(
                 YARVINSN_opt_or |
                 YARVINSN_opt_not |
                 YARVINSN_opt_regexpmatch2 |
+                // opt_respond_to's call data/stack are identical to a respond_to?
+                // send, so the general send path handles it; without this ZJIT
+                // side-exits here and abandons compiling the rest of the method.
+                YARVINSN_opt_respond_to |
                 YARVINSN_opt_send_without_block => {
                     let cd: *const rb_call_data = get_arg(pc, 0).as_ptr();
                     let call_info = unsafe { rb_get_call_data_ci(cd) };
